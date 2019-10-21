@@ -15,33 +15,45 @@
 # limitations under the License.
 """PyTorch OpenAI GPT-2 model."""
 
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import absolute_import, division, print_function, \
+    unicode_literals
 
-import collections
+import argparse
 import copy
 import json
 import logging
 import math
 import os
-import shutil
-import tarfile
-import tempfile
 import sys
 from io import open
 
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim
+import torch.optim as optim
+import torch.utils.data as data
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 from torch.nn import CrossEntropyLoss
 from torch.nn.parameter import Parameter
+from torchtext import data as torchtext_data
+from torchtext import datasets
 
 from .file_utils import cached_path, CONFIG_NAME, WEIGHTS_NAME
 from .modeling_bert import BertLayerNorm as LayerNorm
-from IPython import embed
+
+###############################
+# from modified modeling_gpt2.py
+###############################
 
 logger = logging.getLogger(__name__)
 
-PRETRAINED_MODEL_ARCHIVE_MAP = {"gpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-pytorch_model.bin"}
-PRETRAINED_CONFIG_ARCHIVE_MAP = {"gpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-config.json"}
+PRETRAINED_MODEL_ARCHIVE_MAP = {
+    "gpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-pytorch_model.bin"}
+PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "gpt2": "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-config.json"}
+
 
 def load_tf_weights_in_gpt2(model, gpt2_checkpoint_path):
     """ Load tf checkpoints in a pytorch model
@@ -51,7 +63,8 @@ def load_tf_weights_in_gpt2(model, gpt2_checkpoint_path):
         import numpy as np
         import tensorflow as tf
     except ImportError:
-        print("Loading a TensorFlow models in PyTorch, requires TensorFlow to be installed. Please see "
+        print(
+            "Loading a TensorFlow models in PyTorch, requires TensorFlow to be installed. Please see "
             "https://www.tensorflow.org/install/ for installation instructions.")
         raise
     tf_path = os.path.abspath(gpt2_checkpoint_path)
@@ -98,7 +111,8 @@ def load_tf_weights_in_gpt2(model, gpt2_checkpoint_path):
 
 
 def gelu(x):
-    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+    return 0.5 * x * (1 + torch.tanh(
+        math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
 
 class GPT2Config(object):
@@ -106,15 +120,15 @@ class GPT2Config(object):
     """
 
     def __init__(
-        self,
-        vocab_size_or_config_json_file=50257,
-        n_positions=1024,
-        n_ctx=1024,
-        n_embd=768,
-        n_layer=12,
-        n_head=12,
-        layer_norm_epsilon=1e-5,
-        initializer_range=0.02,
+            self,
+            vocab_size_or_config_json_file=50257,
+            n_positions=1024,
+            n_ctx=1024,
+            n_embd=768,
+            n_layer=12,
+            n_head=12,
+            layer_norm_epsilon=1e-5,
+            initializer_range=0.02,
     ):
         """Constructs GPT2Config.
 
@@ -130,9 +144,11 @@ class GPT2Config(object):
             initializer_range: The sttdev of the truncated_normal_initializer for
                 initializing all weight matrices.
         """
-        if isinstance(vocab_size_or_config_json_file, str) or (sys.version_info[0] == 2
-                        and isinstance(vocab_size_or_config_json_file, unicode)):
-            with open(vocab_size_or_config_json_file, "r", encoding="utf-8") as reader:
+        if isinstance(vocab_size_or_config_json_file, str) or (
+                sys.version_info[0] == 2
+                and isinstance(vocab_size_or_config_json_file, unicode)):
+            with open(vocab_size_or_config_json_file, "r",
+                      encoding="utf-8") as reader:
                 json_config = json.loads(reader.read())
             for key, value in json_config.items():
                 self.__dict__[key] = value
@@ -206,7 +222,10 @@ class Attention(nn.Module):
         n_state = nx  # in Attention: n_state=768 (nx=n_embd)
         # [switch nx => n_state from Block to Attention to keep identical to TF implem]
         assert n_state % config.n_head == 0
-        self.register_buffer("bias", torch.tril(torch.ones(n_ctx, n_ctx)).view(1, 1, n_ctx, n_ctx))
+        self.register_buffer("bias",
+                             torch.tril(torch.ones(n_ctx, n_ctx)).view(1, 1,
+                                                                       n_ctx,
+                                                                       n_ctx))
         self.n_head = config.n_head
         self.split_size = n_state
         self.scale = scale
@@ -218,7 +237,7 @@ class Attention(nn.Module):
         if self.scale:
             w = w / math.sqrt(v.size(-1))
         nd, ns = w.size(-2), w.size(-1)
-        b = self.bias[:, :, ns-nd:ns, :ns]
+        b = self.bias[:, :, ns - nd:ns, :ns]
         w = w * b - 1e4 * (1 - b)
 
         w = nn.Softmax(dim=-1)(w)
@@ -233,9 +252,11 @@ class Attention(nn.Module):
         new_x_shape = x.size()[:-1] + (self.n_head, x.size(-1) // self.n_head)
         x = x.view(*new_x_shape)  # in Tensorflow implem: fct split_states
         if k:
-            return x.permute(0, 2, 3, 1)  # (batch, head, head_features, seq_length)
+            return x.permute(0, 2, 3,
+                             1)  # (batch, head, head_features, seq_length)
         else:
-            return x.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
+            return x.permute(0, 2, 1,
+                             3)  # (batch, head, seq_length, head_features)
 
     def forward(self, x, layer_past=None):
         x = self.c_attn(x)
@@ -244,10 +265,12 @@ class Attention(nn.Module):
         key = self.split_heads(key, k=True)
         value = self.split_heads(value)
         if layer_past is not None:
-            past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]  # transpose back cf below
+            past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[
+                1]  # transpose back cf below
             key = torch.cat((past_key, key), dim=-1)
             value = torch.cat((past_value, value), dim=-2)
-        present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
+        present = torch.stack((key.transpose(-2, -1),
+                               value))  # transpose to have same shapes for stacking
         a = self._attn(query, key, value)
         a = self.merge_heads(a)
         a = self.c_proj(a)
@@ -320,7 +343,10 @@ class GPT2MultipleChoiceHead(nn.Module):
         # Classification logits
         # hidden_state (bsz, num_choices, seq_length, hidden_size)
         # mc_token_ids (bsz, num_choices)
-        mc_token_ids = mc_token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, hidden_states.size(-1))
+        mc_token_ids = mc_token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, -1,
+                                                                       -1,
+                                                                       hidden_states.size(
+                                                                           -1))
         # (bsz, num_choices, 1, hidden_size)
         multiple_choice_h = hidden_states.gather(2, mc_token_ids).squeeze(2)
         # (bsz, num_choices, hidden_size)
@@ -355,7 +381,8 @@ class GPT2PreTrainedModel(nn.Module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            module.weight.data.normal_(mean=0.0,
+                                       std=self.config.initializer_range)
         elif isinstance(module, LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
@@ -364,7 +391,8 @@ class GPT2PreTrainedModel(nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, state_dict=None, cache_dir=None, from_tf=False, *inputs, **kwargs
+            cls, pretrained_model_name_or_path, state_dict=None, cache_dir=None,
+            from_tf=False, *inputs, **kwargs
     ):
         """
         Instantiate a GPT2PreTrainedModel from a pre-trained model file or a pytorch state dict.
@@ -386,21 +414,28 @@ class GPT2PreTrainedModel(nn.Module):
             *inputs, **kwargs: additional input for the specific GPT class
         """
         if pretrained_model_name_or_path in PRETRAINED_MODEL_ARCHIVE_MAP:
-            archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[pretrained_model_name_or_path]
-            config_file = PRETRAINED_CONFIG_ARCHIVE_MAP[pretrained_model_name_or_path]
+            archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[
+                pretrained_model_name_or_path]
+            config_file = PRETRAINED_CONFIG_ARCHIVE_MAP[
+                pretrained_model_name_or_path]
         else:
-            archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
-            config_file = os.path.join(pretrained_model_name_or_path, CONFIG_NAME)
+            archive_file = os.path.join(pretrained_model_name_or_path,
+                                        WEIGHTS_NAME)
+            config_file = os.path.join(pretrained_model_name_or_path,
+                                       CONFIG_NAME)
         # redirect to the cache, if necessary
         try:
-            resolved_archive_file = cached_path(archive_file, cache_dir=cache_dir)
+            resolved_archive_file = cached_path(archive_file,
+                                                cache_dir=cache_dir)
             resolved_config_file = cached_path(config_file, cache_dir=cache_dir)
         except EnvironmentError:
             logger.error(
                 "Model name '{}' was not found in model name list ({}). "
                 "We assumed '{}' was a path or url but couldn't find files {} and {} "
                 "at this path or url.".format(
-                    pretrained_model_name_or_path, ", ".join(PRETRAINED_MODEL_ARCHIVE_MAP.keys()), pretrained_model_name_or_path,
+                    pretrained_model_name_or_path,
+                    ", ".join(PRETRAINED_MODEL_ARCHIVE_MAP.keys()),
+                    pretrained_model_name_or_path,
                     archive_file, config_file
                 )
             )
@@ -450,30 +485,36 @@ class GPT2PreTrainedModel(nn.Module):
             state_dict._metadata = metadata
 
         def load(module, prefix=""):
-            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+            local_metadata = {} if metadata is None else metadata.get(
+                prefix[:-1], {})
             module._load_from_state_dict(
-                state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs
+                state_dict, prefix, local_metadata, True, missing_keys,
+                unexpected_keys, error_msgs
             )
             for name, child in module._modules.items():
                 if child is not None:
                     load(child, prefix + name + ".")
 
         start_model = model
-        if hasattr(model, "transformer") and all(not s.startswith('transformer.') for s in state_dict.keys()):
+        if hasattr(model, "transformer") and all(
+                not s.startswith('transformer.') for s in state_dict.keys()):
             start_model = model.transformer
         load(start_model, prefix="")
 
         if len(missing_keys) > 0:
             logger.info(
-                "Weights of {} not initialized from pretrained model: {}".format(model.__class__.__name__, missing_keys)
+                "Weights of {} not initialized from pretrained model: {}".format(
+                    model.__class__.__name__, missing_keys)
             )
         if len(unexpected_keys) > 0:
             logger.info(
-                "Weights from pretrained model not used in {}: {}".format(model.__class__.__name__, unexpected_keys)
+                "Weights from pretrained model not used in {}: {}".format(
+                    model.__class__.__name__, unexpected_keys)
             )
         if len(error_msgs) > 0:
             raise RuntimeError(
-                "Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs))
+                "Error(s) in loading state_dict for {}:\n\t{}".format(
+                    model.__class__.__name__, "\n\t".join(error_msgs))
             )
 
         # Make sure we are still sharing the output and input embeddings after loading weights
@@ -525,12 +566,14 @@ class GPT2Model(GPT2PreTrainedModel):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         block = Block(config.n_ctx, config, scale=True)
-        self.h = nn.ModuleList([copy.deepcopy(block) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList(
+            [copy.deepcopy(block) for _ in range(config.n_layer)])
         self.ln_f = LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
         self.apply(self.init_weights)
 
-    def forward(self, input_ids, position_ids=None, token_type_ids=None, past=None):
+    def forward(self, input_ids, position_ids=None, token_type_ids=None,
+                past=None):
         # if input_ids.dtype != torch.long:
         #     input_ids = input_ids.long()
 
@@ -539,20 +582,26 @@ class GPT2Model(GPT2PreTrainedModel):
             past = [None] * len(self.h)
         else:
             past_length = past[0][0].size(-2)
-        if position_ids is None and  input_ids.size(-1)<20000:
-            position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long, device=input_ids.device)
+        if position_ids is None and input_ids.size(-1) < 20000:
+            position_ids = torch.arange(past_length,
+                                        input_ids.size(-1) + past_length,
+                                        dtype=torch.long,
+                                        device=input_ids.device)
             position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-        elif  position_ids is None and  input_ids.size(-1)>20000:
-            position_ids = torch.arange(past_length, input_ids.size(-2) + past_length, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids[:,:, 0])
+        elif position_ids is None and input_ids.size(-1) > 20000:
+            position_ids = torch.arange(past_length,
+                                        input_ids.size(-2) + past_length,
+                                        dtype=torch.long,
+                                        device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand_as(
+                input_ids[:, :, 0])
         input_shape = input_ids.size()
-
 
         input_ids = input_ids.view(-1, input_ids.size(-1))
         position_ids = position_ids.view(-1, position_ids.size(-1))
         flag_bb = 0
 
-        if input_shape[-1]  < 20000:
+        if input_shape[-1] < 20000:
             inputs_embeds = self.wte(input_ids)
             flag_bb = 0
         else:
@@ -561,8 +610,7 @@ class GPT2Model(GPT2PreTrainedModel):
             inputs_embeds = torch.unsqueeze(inputs_embeds, dim=1)
             flag_bb = 1
 
-
-        #inputs_embeds.retain_grad()
+        # inputs_embeds.retain_grad()
         self.i_embeds = inputs_embeds
         position_embeds = self.wpe(position_ids)
         if token_type_ids is not None:
@@ -581,7 +629,6 @@ class GPT2Model(GPT2PreTrainedModel):
             #     print(layer_past)
             #     exit()
 
-
             hidden_states, present = block(hidden_states, layer_past)
             hiddens.append(hidden_states)
             presents.append(present)
@@ -593,7 +640,8 @@ class GPT2Model(GPT2PreTrainedModel):
         return hidden_states.view(*output_shape), presents
 
     # HACK HACK HACK
-    def forward_embed(self, input_ids, position_ids=None, token_type_ids=None, past=None):
+    def forward_embed(self, input_ids, position_ids=None, token_type_ids=None,
+                      past=None):
         if input_ids.dtype != torch.long:
             input_ids = input_ids.long()
 
@@ -603,7 +651,10 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             past_length = past[0][0].size(-2)
         if position_ids is None:
-            position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long, device=input_ids.device)
+            position_ids = torch.arange(past_length,
+                                        input_ids.size(-1) + past_length,
+                                        dtype=torch.long,
+                                        device=input_ids.device)
             position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
 
         self.input_shape = input_ids.size()
@@ -612,7 +663,7 @@ class GPT2Model(GPT2PreTrainedModel):
         position_ids = position_ids.view(-1, position_ids.size(-1))
 
         inputs_embeds = self.wte(input_ids)
-        #inputs_embeds.retain_grad()
+        # inputs_embeds.retain_grad()
         self.i_embeds = inputs_embeds
         position_embeds = self.wpe(position_ids)
         if token_type_ids is not None:
@@ -644,20 +695,24 @@ class GPT2Model(GPT2PreTrainedModel):
         self.hiddens_list = hiddens
         self.hidden_states = hidden_states
         if add_one:
-            output_shape = (self.input_shape[0],) + (self.input_shape[1] + 1,) + (hidden_states.size(-1),)
+            output_shape = (self.input_shape[0],) + (
+            self.input_shape[1] + 1,) + (hidden_states.size(-1),)
         else:
-            output_shape = (self.input_shape[0],) + (self.input_shape[1],) + (hidden_states.size(-1),)
+            output_shape = (self.input_shape[0],) + (self.input_shape[1],) + (
+            hidden_states.size(-1),)
 
         if add_one:
-            present_shape = (self.input_shape[0],) + (self.input_shape[1] + 1,) + (2*hidden_states.size(-1),)
+            present_shape = (self.input_shape[0],) + (
+            self.input_shape[1] + 1,) + (2 * hidden_states.size(-1),)
         else:
-            present_shape = (self.input_shape[0],) + (self.input_shape[1],) + (2*hidden_states.size(-1),)
+            present_shape = (self.input_shape[0],) + (self.input_shape[1],) + (
+            2 * hidden_states.size(-1),)
 
         presents = [p.view(*present_shape) for p in presents]
 
         return hidden_states.view(*output_shape), presents
 
-    #def forward_hidden(self, hidden_states, past=None):
+    # def forward_hidden(self, hidden_states, past=None):
     #    if past is None:
     #        past_length = 0
     #        past = [None] * len(self.h)
@@ -729,8 +784,10 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         """
         self.lm_head.set_embeddings_weights(self.transformer.wte.weight)
 
-    def forward(self, input_ids, position_ids=None, token_type_ids=None, lm_labels=None, past=None):
-        hidden_states, presents = self.transformer(input_ids, position_ids, token_type_ids, past)
+    def forward(self, input_ids, position_ids=None, token_type_ids=None,
+                lm_labels=None, past=None):
+        hidden_states, presents = self.transformer(input_ids, position_ids,
+                                                   token_type_ids, past)
 
         self.hidden_states = hidden_states
         lm_logits = self.lm_head(hidden_states)
@@ -747,15 +804,18 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         return lm_logits, presents
 
     # HACK HACK HACK
-    def forward_embed(self, inputs_ids, position_ids=None, token_type_ids=None, past=None):
-        hidden_states = self.transformer.forward_embed(inputs_ids, position_ids, token_type_ids, past)
-    #     self.hidden_states_fe = hidden_states
-    #     lm_logits = self.lm_head(hidden_states)
+    def forward_embed(self, inputs_ids, position_ids=None, token_type_ids=None,
+                      past=None):
+        hidden_states = self.transformer.forward_embed(inputs_ids, position_ids,
+                                                       token_type_ids, past)
+        #     self.hidden_states_fe = hidden_states
+        #     lm_logits = self.lm_head(hidden_states)
         return hidden_states
 
-    def forward_transformer_embed(self, hidden_states, past=None, add_one=False):
-
-        hidden_states, presents = self.transformer.forward_transformer(hidden_states, past, add_one=add_one)
+    def forward_transformer_embed(self, hidden_states, past=None,
+                                  add_one=False):
+        hidden_states, presents = self.transformer.forward_transformer(
+            hidden_states, past, add_one=add_one)
         # lm_logits = self.lm_head(hidden_states)
         # if lm_labels is not None:
         #     # Shift so that tokens < n predict n
@@ -770,8 +830,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         return hidden_states, presents
 
     def forward_hidden(self, hidden_states):
-        #hidden_states, presents = self.transformer.forward_hidden(hidden_states, past)
-        #self.hidden_states_fh = hidden_states
+        # hidden_states, presents = self.transformer.forward_hidden(hidden_states, past)
+        # self.hidden_states_fh = hidden_states
         '''Just runing the last MLP (LM head)'''
         lm_logits = self.lm_head(hidden_states)
         return lm_logits
@@ -838,8 +898,10 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
         """
         self.lm_head.set_embeddings_weights(self.transformer.wte.weight)
 
-    def forward(self, input_ids, mc_token_ids, lm_labels=None, mc_labels=None, token_type_ids=None, position_ids=None, past=None):
-        hidden_states, presents = self.transformer(input_ids, position_ids, token_type_ids, past)
+    def forward(self, input_ids, mc_token_ids, lm_labels=None, mc_labels=None,
+                token_type_ids=None, position_ids=None, past=None):
+        hidden_states, presents = self.transformer(input_ids, position_ids,
+                                                   token_type_ids, past)
         lm_logits = self.lm_head(hidden_states)
         mc_logits = self.multiple_choice_head(hidden_states, mc_token_ids)
         losses = []
@@ -848,35 +910,27 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
             shift_labels = lm_labels[:, 1:].contiguous()
             loss_fct = CrossEntropyLoss(ignore_index=-1)
             losses.append(loss_fct(shift_logits.view(-1,
-                          shift_logits.size(-1)), shift_labels.view(-1)))
+                                                     shift_logits.size(-1)),
+                                   shift_labels.view(-1)))
         if mc_labels is not None:
             loss_fct = CrossEntropyLoss()
-            losses.append(loss_fct(mc_logits.view(-1, mc_logits.size(-1)), mc_labels.view(-1)))
+            losses.append(loss_fct(mc_logits.view(-1, mc_logits.size(-1)),
+                                   mc_labels.view(-1)))
         if losses:
             return losses
         return lm_logits, mc_logits, presents
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#####################
+# from style_utils.py
+#####################
 
 
 def to_var(x, requires_grad=False, volatile=False):
     if torch.cuda.is_available():
         x = x.cuda()
     return Variable(x, requires_grad=requires_grad, volatile=volatile)
+
 
 def top_k_logits(logits, k, probs=False):
     """
@@ -890,50 +944,16 @@ def top_k_logits(logits, k, probs=False):
         values = torch.topk(logits, k)[0]
         batch_mins = values[:, -1].view(-1, 1).expand_as(logits)
         if probs:
-            return torch.where(logits < batch_mins, torch.ones_like(logits) * 0.0, logits)
-        return torch.where(logits < batch_mins, torch.ones_like(logits) * -1e10, logits)
+            return torch.where(logits < batch_mins,
+                               torch.ones_like(logits) * 0.0, logits)
+        return torch.where(logits < batch_mins, torch.ones_like(logits) * -1e10,
+                           logits)
 
 
+#########################
+# from gpt2tunediscrim.py
+#########################
 
-
-
-
-
-
-
-
-
-
-
-
-#! /usr/bin/env python3
-# coding=utf-8
-
-# This code is licensed under a non-commercial license.
-
-import os
-import sys
-import argparse
-from tqdm import trange
-from torchtext import data as torchtext_data
-from torchtext import datasets
-
-import torch
-import torch.utils.data as data
-
-from torchtext.vocab import Vectors, GloVe, CharNGram, FastText
-from nltk.tokenize.treebank import TreebankWordDetokenizer
-import torch
-import torch.optim
-import torch.nn.functional as F
-import numpy as np
-from IPython import embed
-from operator import add
-import copy
-import pickle
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import random_split
-import torch.optim as optim
 
 torch.manual_seed(0)
 np.random.seed(0)
@@ -974,7 +994,8 @@ class Discriminator(torch.nn.Module):
         super(Discriminator, self).__init__()
         self.classifierhead = ClassificationHead()
         self.model = model
-        self.spltoken = Variable(torch.randn(1, 1, 1024).type(torch.FloatTensor), requires_grad=True)
+        self.spltoken = Variable(
+            torch.randn(1, 1, 1024).type(torch.FloatTensor), requires_grad=True)
         self.spltoken = self.spltoken.repeat(10, 1, 1)
         self.spltoken = self.spltoken.cuda()
 
@@ -995,7 +1016,8 @@ class Discriminator(torch.nn.Module):
 class Discriminator2(torch.nn.Module):
     def __init__(self, class_size=5, embed_size=1024):
         super(Discriminator2, self).__init__()
-        self.classifierhead = ClassificationHead(class_size=class_size, embed_size=embed_size)
+        self.classifierhead = ClassificationHead(class_size=class_size,
+                                                 embed_size=embed_size)
         self.model = model
         self.embed_size = embed_size
 
@@ -1016,10 +1038,12 @@ class Discriminator2(torch.nn.Module):
         x = F.log_softmax(x, dim=-1)
         return x
 
+
 class Discriminator2mean(torch.nn.Module):
     def __init__(self, class_size=5, embed_size=1024):
         super(Discriminator2mean, self).__init__()
-        self.classifierhead = ClassificationHead(class_size=class_size, embed_size=embed_size)
+        self.classifierhead = ClassificationHead(class_size=class_size,
+                                                 embed_size=embed_size)
         self.model = model
         self.embed_size = embed_size
 
@@ -1033,7 +1057,8 @@ class Discriminator2mean(torch.nn.Module):
         self.classifierhead.train()
 
     def forward(self, x):
-        mask_src = 1 - x.eq(0).unsqueeze(1).type(torch.FloatTensor).cuda().detach()
+        mask_src = 1 - x.eq(0).unsqueeze(1).type(
+            torch.FloatTensor).cuda().detach()
         mask_src = mask_src.repeat(1, self.embed_size, 1)
         x = model.forward_embed(x)
         hidden, x = model.forward_transformer_embed(x)
@@ -1044,10 +1069,12 @@ class Discriminator2mean(torch.nn.Module):
         hidden = hidden * mask_src  # / torch.sum(mask_src, dim=-1).unsqueeze(2).repeat(1, 1, batch_length)
         #
         hidden = hidden.permute(0, 2, 1)
-        x = torch.sum(hidden, dim=1)/(torch.sum(mask_src, dim=-1).detach() + 1e-10)
+        x = torch.sum(hidden, dim=1) / (
+                    torch.sum(mask_src, dim=-1).detach() + 1e-10)
         x = self.classifierhead(x)
         x = F.log_softmax(x, dim=-1)
         return x
+
 
 class Dataset(data.Dataset):
     def __init__(self, X, y):
@@ -1070,7 +1097,8 @@ def collate_fn(data):
     def merge(sequences):
         lengths = [len(seq) for seq in sequences]
 
-        padded_seqs = torch.zeros(len(sequences), max(lengths)).long().cuda()  # padding index 0
+        padded_seqs = torch.zeros(len(sequences),
+                                  max(lengths)).long().cuda()  # padding index 0
         for i, seq in enumerate(sequences):
             end = lengths[i]
             padded_seqs[i, :end] = seq[:end]
@@ -1117,27 +1145,33 @@ def test_epoch(data_loader, discriminator, device='cuda', args=None):
         for data, target in data_loader:
             data, target = data.to(device), target.to(device)
             output = discriminator(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            test_loss += F.nll_loss(output, target,
+                                    reduction='sum').item()  # sum up batch loss
+            pred = output.argmax(dim=1,
+                                 keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(data_loader.dataset)
 
-    print('\nRelu Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(data_loader.dataset),
-        100. * correct / len(data_loader.dataset)))
+    print(
+        '\nRelu Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            test_loss, correct, len(data_loader.dataset),
+            100. * correct / len(data_loader.dataset)))
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train a discriminator on top of GPT-2 representations')
+    parser = argparse.ArgumentParser(
+        description='Train a discriminator on top of GPT-2 representations')
     parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='Number of training epochs')
-    parser.add_argument('--save-model', action='store_true', help='whether to save the model')
-    parser.add_argument('--dataset-label', type=str, default='SST',choices=('SST', 'clickbait', 'toxic'))
+    parser.add_argument('--save-model', action='store_true',
+                        help='whether to save the model')
+    parser.add_argument('--dataset-label', type=str, default='SST',
+                        choices=('SST', 'clickbait', 'toxic'))
     args = parser.parse_args()
 
     batch_size = args.batch_size
@@ -1146,15 +1180,19 @@ def main():
     if args.dataset_label == 'SST':
         text = torchtext_data.Field()
         label = torchtext_data.Field(sequential=False)
-        train_data, val_data, test_data = datasets.SST.splits(text, label, fine_grained=True, train_subtrees=True,
+        train_data, val_data, test_data = datasets.SST.splits(text, label,
+                                                              fine_grained=True,
+                                                              train_subtrees=True,
                                                               # filter_pred=lambda ex: ex.label != 'neutral'
                                                               )
         x = []
         y = []
-        d = {"positive": 0, "negative": 1, "very positive": 2, "very negative": 3, "neutral": 4}
+        d = {"positive": 0, "negative": 1, "very positive": 2,
+             "very negative": 3, "neutral": 4}
 
         for i in range(len(train_data)):
-            seq = TreebankWordDetokenizer().detokenize(vars(train_data[i])["text"])
+            seq = TreebankWordDetokenizer().detokenize(
+                vars(train_data[i])["text"])
             seq = tokenizer.encode(seq)
             seq = torch.tensor(seq, device=device, dtype=torch.long)
             x.append(seq)
@@ -1165,7 +1203,8 @@ def main():
         test_x = []
         test_y = []
         for i in range(len(test_data)):
-            seq = TreebankWordDetokenizer().detokenize(vars(test_data[i])["text"])
+            seq = TreebankWordDetokenizer().detokenize(
+                vars(test_data[i])["text"])
             seq = tokenizer.encode(seq)
             seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
             test_x.append(seq)
@@ -1191,7 +1230,8 @@ def main():
                     seq = tokenizer.encode(d["text"])
                 except:
                     continue
-                seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
+                seq = torch.tensor([50256] + seq, device=device,
+                                   dtype=torch.long)
                 x.append(seq)
                 y.append(d['label'])
             except:
@@ -1200,7 +1240,9 @@ def main():
         dataset = Dataset(x, y)
         train_size = int(0.9 * len(dataset))
         test_size = len(dataset) - train_size
-        dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+        dataset, test_dataset = torch.utils.data.random_split(dataset,
+                                                              [train_size,
+                                                               test_size])
         discriminator = Discriminator2mean(class_size=2).to(device)
 
     elif args.dataset_label == 'toxic':
@@ -1218,12 +1260,13 @@ def main():
                 seq = tokenizer.encode(d["text"])
 
                 device = 'cuda'
-                if(len(seq)<100):
-                    seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
+                if (len(seq) < 100):
+                    seq = torch.tensor([50256] + seq, device=device,
+                                       dtype=torch.long)
                 else:
                     continue
                 x.append(seq)
-                y.append(int(np.sum(d['label'])>0))
+                y.append(int(np.sum(d['label']) > 0))
             except:
                 pass
 
@@ -1232,33 +1275,42 @@ def main():
         print(len(dataset))
         train_size = int(0.9 * len(dataset))
         test_size = len(dataset) - train_size
-        dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+        dataset, test_dataset = torch.utils.data.random_split(dataset,
+                                                              [train_size,
+                                                               test_size])
         discriminator = Discriminator2mean(class_size=2).to(device)
 
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                               batch_size=batch_size,
-                                              shuffle=True, collate_fn=collate_fn)
+                                              shuffle=True,
+                                              collate_fn=collate_fn)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                              batch_size=batch_size, collate_fn=collate_fn)
+                                              batch_size=batch_size,
+                                              collate_fn=collate_fn)
 
     for epoch in range(args.epochs):
-        train_epoch(discriminator=discriminator, data_loader=data_loader, args=args, device=device, epoch=epoch)
-        test_epoch(data_loader=test_loader, discriminator=discriminator, args=args)
-        seq = tokenizer.encode("This is incredible! I love it, this is the best chicken I have ever had.")
+        train_epoch(discriminator=discriminator, data_loader=data_loader,
+                    args=args, device=device, epoch=epoch)
+        test_epoch(data_loader=test_loader, discriminator=discriminator,
+                   args=args)
+        seq = tokenizer.encode(
+            "This is incredible! I love it, this is the best chicken I have ever had.")
         seq = torch.tensor([seq], device=device, dtype=torch.long)
         print(discriminator(seq))
 
         if (args.save_model):
             torch.save(discriminator.state_dict(),
-                       "discrim_models/{}_mean_lin_discriminator_{}.pt".format(args.dataset_label, epoch))
+                       "discrim_models/{}_mean_lin_discriminator_{}.pt".format(
+                           args.dataset_label, epoch))
             torch.save(discriminator.get_classifier().state_dict(),
-                       "discrim_models/{}_classifierhead.pt".format(args.dataset_label))
+                       "discrim_models/{}_classifierhead.pt".format(
+                           args.dataset_label))
 
-    seq = tokenizer.encode("This is incredible! I love it, this is the best chicken I have ever had.")
+    seq = tokenizer.encode(
+        "This is incredible! I love it, this is the best chicken I have ever had.")
     seq = torch.tensor([seq], device=device, dtype=torch.long)
     print(discriminator(seq))
 
 
 if __name__ == '__main__':
     main()
-
