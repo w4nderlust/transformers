@@ -18,6 +18,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import logging
 
+from transformers.configuration_pplm import PPLMConfig
 from .configuration_bert import BertConfig
 from .configuration_openai import OpenAIGPTConfig
 from .configuration_gpt2 import GPT2Config
@@ -132,6 +133,8 @@ class AutoConfig(object):
             return XLMConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
         elif 'ctrl' in pretrained_model_name_or_path:
             return CTRLConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        elif 'ppl' in pretrained_model_name_or_path:
+            return PPLMConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
         raise ValueError("Unrecognized model identifier in {}. Should contains one of "
                          "'bert', 'openai-gpt', 'gpt2', 'transfo-xl', 'xlnet', "
-                         "'xlm', 'roberta', 'ctrl'".format(pretrained_model_name_or_path))
+                         "'xlm', 'roberta', 'ctrl', 'pplm'".format(pretrained_model_name_or_path))
