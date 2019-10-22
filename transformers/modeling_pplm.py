@@ -92,7 +92,7 @@ def to_var(x, requires_grad=False, volatile=False):
     return Variable(x, requires_grad=requires_grad, volatile=volatile)
 
 
-def top_k_logits(logits, k, probs=False):
+def top_k_filter(logits, k, probs=False):
     """
     Masks everything but the k top entries as -infinity (1e10).
     Used to mask logits such that e^-infinity -> 0 won't contribute to the
@@ -123,26 +123,27 @@ def perturb_past(
         past,
         model,
         prev,
-        window_length,
-        fusion_gm_scale,
-        fusion_kl_scale,
-        loss_type,
-        decay,
-        num_iterations,
-        horizon_length,
-        gamma,
-        classifier=None,
-        label_class=None,
-        bow_indices=None,
-        stepsize=0.01,
         vocab_size=50257,
         original_probs=None,
         accumulated_hidden=None,
         true_past=None,
-        grad_norms=None
+        grad_norms=None,
+        stepsize=0.01,
+        classifier=None,
+        label_class=None,
+        bow_indices=None,
+        loss_type=0,
+        num_iterations=3,
+        fusion_gm_scale=0.9,
+        fusion_kl_scale=0.01,
+        window_length=0,
+        horizon_length=1,
+        decay=False,
+        gamma=1.5
 ):
     window_length = window_length
     gm_scale, kl_scale = fusion_gm_scale, fusion_kl_scale
+
     one_hot_vectors = []
     for good_list in bow_indices:
         good_list = list(filter(lambda x: len(x) <= 1, good_list))
@@ -198,12 +199,12 @@ def perturb_past(
         past_perturb = [torch.from_numpy(p_) for p_ in past_perturb_orig]
         past_perturb = [to_var(p_, requires_grad=True) for p_ in past_perturb]
 
-        perturbed_past = list(map(add, past, past_perturb))
+        pert_past = list(map(add, past, past_perturb))
 
         _, _, _, current_length, _ = past_perturb[0].shape
 
         # Compute hidden using perturbed past
-        logits, future_past, all_hidden = model(prev, past=perturbed_past)
+        logits, future_past, all_hidden = model(prev, past=pert_past)
         hidden = all_hidden[-1]
         new_accumulated_hidden = accumulated_hidden + torch.sum(hidden,
                                                                 dim=1).detach()
@@ -291,9 +292,9 @@ def perturb_past(
 
     past_perturb = [torch.from_numpy(p_) for p_ in past_perturb_orig]
     past_perturb = [to_var(p_, requires_grad=True) for p_ in past_perturb]
-    perturbed_past = list(map(add, past, past_perturb))
+    pert_past = list(map(add, past, past_perturb))
 
-    return perturbed_past, new_accumulated_hidden, grad_norms, loss_per_iter
+    return pert_past, new_accumulated_hidden, grad_norms, loss_per_iter
 
 
 def get_classifier(name, label_class, device):
@@ -392,6 +393,7 @@ def full_text_generation(
             model=model,
             context=context,
             device=device,
+            sample=sample,
             perturb=True,
             bow_indices=bow_indices,
             classifier=classifier,
@@ -444,132 +446,126 @@ def generate_text_pplm(
         decay=False,
         gamma=1.5
 ):
-    output = torch.tensor(
+    output_so_far = torch.tensor(
         context,
         device=device, dtype=torch.long
     ).unsqueeze(0) if context else None
 
     grad_norms = None
+    last = None
+    unpert_discrim_loss = 0
     loss_in_time = []
     for i in trange(length, ascii=True):
 
         # Get past/probs for current output, except for last word
-        # Note that GPT takes 2 inputs: past + current-token
+        # Note that GPT takes 2 inputs: past + current_token
+        # TODO: what's i/p?
         # Therefore, use everything from before current i/p token to generate relevant past
 
-        if past is None and output is not None:
-            prev = output[:, -1:]
-            _, past, _ = model(output[:, :-1])
-            original_probs, true_past, all_hidden = model(output)
-            true_hidden = all_hidden[-1]
+        # run model forward to obtain unperturbed
+        if past is None and output_so_far is not None:
+            last = output_so_far[:, -1:]
+            _, past, _ = model(output_so_far[:, :-1])
+            unpert_logits, unpert_past, unpert_all_hidden = model(output_so_far)
+            unpert_last_hidden = unpert_all_hidden[-1]
 
         else:
-            original_probs, true_past, all_hidden = model(output)
-            true_hidden = all_hidden[-1]
+            unpert_logits, unpert_past, unpert_all_hidden = model(output_so_far)
+            unpert_last_hidden = unpert_all_hidden[-1]
 
-        # Modify the past if necessary
-
+        # check if we are abowe grad max length
         if i >= grad_length:
             current_stepsize = stepsize * 0
         else:
             current_stepsize = stepsize
 
+        # modify the past if necessary
         if not perturb or num_iterations == 0:
-            perturbed_past = past
+            pert_past = past
 
         else:
-            # accumulated_hidden = model.hidden_states[:, :-1, :]
-            accumulated_hidden = true_hidden[:, :-1, :]
+            accumulated_hidden = unpert_last_hidden[:, :-1, :]
             accumulated_hidden = torch.sum(accumulated_hidden, dim=1)
 
-            perturbed_past, _, grad_norms, loss_per_iter = perturb_past(
+            pert_past, _, grad_norms, loss_this_iter = perturb_past(
                 past,
                 model,
-                prev,
-                window_length,
-                fusion_gm_scale,
-                fusion_kl_scale,
-                loss_type,
-                decay,
-                num_iterations,
-                horizon_length,
-                gamma,
+                last,
+                original_probs=unpert_logits,
+                accumulated_hidden=accumulated_hidden,
+                true_past=unpert_past,
+                grad_norms=grad_norms,
+                stepsize=current_stepsize,
                 classifier=classifier,
                 label_class=label_class,
                 bow_indices=bow_indices,
-                stepsize=current_stepsize,
-                original_probs=original_probs,
-                true_past=true_past,
-                accumulated_hidden=accumulated_hidden,
-                grad_norms=grad_norms
+                loss_type=loss_type,
+                num_iterations=num_iterations,
+                fusion_gm_scale=fusion_gm_scale,
+                fusion_kl_scale=fusion_kl_scale,
+                window_length=window_length,
+                horizon_length=horizon_length,
+                decay=decay,
+                gamma=gamma
             )
-            loss_in_time.append(loss_per_iter)
+            loss_in_time.append(loss_this_iter)
 
-        logits, past, all_hidden = model(prev, past=perturbed_past)
-        # test_logits = F.softmax(test_logits[:, -1, :], dim=-1)
-        # likelywords = torch.topk(test_logits, k=10, dim=-1)
-        # print(enc.decode(likelywords[1].tolist()[0]))
+        pert_logits, past, pert_all_hidden = model(last, past=pert_past)
+        pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
+        pert_probs = F.softmax(pert_logits, dim=-1)
 
+        # compute the discriminator loss using unperturbed hidden
         if classifier is not None:
-            ce_loss = torch.nn.CrossEntropyLoss()
-            predicted_sentiment = classifier(torch.mean(true_hidden, dim=1))
+            prediction = classifier(
+                torch.mean(unpert_last_hidden, dim=1)
+            )
             label = torch.tensor(
                 [label_class],
                 device='cuda',
                 dtype=torch.long
             )
-            true_discrim_loss = ce_loss(predicted_sentiment, label)
-            print("true discrim loss", true_discrim_loss.data.cpu().numpy())
+            unpert_discrim_loss = torch.nn.CrossEntropyLoss()(prediction, label)
+            print("unperturbed discrim loss", unpert_discrim_loss.data.cpu().numpy())
+
         else:
-            true_discrim_loss = 0
+            unpert_discrim_loss = 0
 
-        hidden = all_hidden[-1]  # update hidden
-        # logits = model.forward_hidden(hidden)
-        logits = logits[:, -1, :] / temperature  # + SMALL_CONST
-
-        # logits = top_k_logits(logits, k=top_k)  # + SMALL_CONST
-
-        log_probs = F.softmax(logits, dim=-1)
-
-        # Fuse the modified model and original model
+        # Fuse the modified model and original model probabilities
         if perturb:
-
-            # original_probs = top_k_logits(original_probs[:, -1, :]) #+ SMALL_CONST
-            original_probs = F.softmax(original_probs[:, -1, :], dim=-1)
-            # likelywords = torch.topk(original_probs, k=10, dim=-1)
-            # print(enc.decode(likelywords[1].tolist()[0]))
+            unpert_probs = F.softmax(unpert_logits[:, -1, :], dim=-1)
 
             gm_scale = fusion_gm_scale
-            log_probs = ((log_probs ** gm_scale) * (
-                    original_probs ** (1 - gm_scale)))  # + SMALL_CONST
+            pert_probs = (
+                    (pert_probs ** gm_scale) *
+                    (unpert_probs ** (1 - gm_scale))
+            )  # + SMALL_CONST
 
-            log_probs = top_k_logits(log_probs, k=top_k,
-                                     probs=True)  # + SMALL_CONST
+            pert_probs = top_k_filter(
+                pert_probs,
+                k=top_k,
+                probs=True
+            )  # + SMALL_CONST
 
-            if torch.sum(log_probs) <= 1:
-                log_probs = log_probs / torch.sum(log_probs)
+            # rescale
+            if torch.sum(pert_probs) <= 1:
+                pert_probs = pert_probs / torch.sum(pert_probs)
 
         else:
-            logits = top_k_logits(logits, k=top_k)  # + SMALL_CONST
-            log_probs = F.softmax(logits, dim=-1)
+            pert_logits = top_k_filter(pert_logits, k=top_k)  # + SMALL_CONST
+            pert_probs = F.softmax(pert_logits, dim=-1)
 
+        # sample or greedy
         if sample:
-            # likelywords = torch.topk(log_probs, k=top_k, dim=-1)
-            # print(enc.decode(likelywords[1].tolist()[0]))
-            # print(likelywords[0].tolist())
-            prev = torch.multinomial(log_probs, num_samples=1)
+            last = torch.multinomial(pert_probs, num_samples=1)
 
         else:
-            _, prev = torch.topk(log_probs, k=1, dim=-1)
+            _, last = torch.topk(pert_probs, k=1, dim=-1)
 
-        # if perturb:
-        #     prev = future
+        # update context/output_so_far appending the new token
+        output_so_far = last if output_so_far is None else torch.cat((output_so_far, last), dim=1)
+        print(TOKENIZER.decode(output_so_far.tolist()[0]))
 
-        # update output
-        output = prev if output is None else torch.cat((output, prev), dim=1)
-        print(TOKENIZER.decode(output.tolist()[0]))
-
-    return output, true_discrim_loss, loss_in_time
+    return output_so_far, unpert_discrim_loss, loss_in_time
 
 
 def run_model():
