@@ -37,7 +37,10 @@ from tqdm import trange
 from transformers import GPT2Tokenizer
 from transformers.modeling_gpt2 import GPT2LMHeadModel
 
-SmallConst = 1e-15
+# TODO: Sumanth, what is this number? End/Begin sentence token?
+#       This should not be hardcoded as the vocab may change with each model
+MAGIC_NUMBER = 50256
+SMALL_CONST = 1e-15
 enc = GPT2Tokenizer.from_pretrained('gpt2-medium')
 
 discriminator_models_paths = {
@@ -48,7 +51,7 @@ discriminator_models_paths = {
 
 
 class ClassificationHead(torch.nn.Module):
-    """ Language Model Head for the transformer """
+    """ Classification Head for the transformer """
 
     def __init__(self, class_size=5, embed_size=2048):
         super(ClassificationHead, self).__init__()
@@ -60,11 +63,11 @@ class ClassificationHead(torch.nn.Module):
 
     def forward(self, hidden_state):
         # Truncated Language modeling logits (we remove the last token)
-        # h_trunc = h[:, :-1].contiguous().view(-1, self.n_embd)
-        # lm_logits = F.relu(self.mlp1(hidden_state))
-        # lm_logits = self.mlp2(lm_logits)
-        lm_logits = self.mlp(hidden_state)
-        return lm_logits
+        # hidden_state = hidden_state[:, :-1].contiguous().view(-1, self.n_embd)
+        # hidden_state = F.relu(self.mlp1(hidden_state))
+        # hidden_state = self.mlp2(hidden_state)
+        logits = self.mlp(hidden_state)
+        return logits
 
 
 def to_var(x, requires_grad=False, volatile=False):
@@ -79,26 +82,45 @@ def top_k_logits(logits, k, probs=False):
     Used to mask logits such that e^-infinity -> 0 won't contribute to the
     sum of the denominator.
     """
-    if k == 0:
+    if k <= 0:
         return logits
+
     else:
         values = torch.topk(logits, k)[0]
         batch_mins = values[:, -1].view(-1, 1).expand_as(logits)
+
         if probs:
-            return torch.where(logits < batch_mins,
-                               torch.ones_like(logits) * 0.0, logits)
-        return torch.where(logits < batch_mins, torch.ones_like(logits) * -1e10,
-                           logits)
+            return torch.where(
+                logits < batch_mins,
+                torch.ones_like(logits) * 0.0,
+                logits
+            )
+
+        return torch.where(
+            logits < batch_mins,
+            torch.ones_like(logits) * -1e10,
+            logits
+        )
 
 
-def perturb_past(past, model, prev, args, classifier, good_index=None,
-                 stepsize=0.01, vocab_size=50257,
-                 original_probs=None, accumulated_hidden=None, true_past=None,
-                 grad_norms=None):
+def perturb_past(
+        past,
+        model,
+        prev,
+        args,
+        classifier,
+        bow_indices=None,
+        stepsize=0.01,
+        vocab_size=50257,
+        original_probs=None,
+        accumulated_hidden=None,
+        true_past=None,
+        grad_norms=None
+):
     window_length = args.window_length
     gm_scale, kl_scale = args.fusion_gm_scale, args.fusion_kl_scale
     one_hot_vectors = []
-    for good_list in good_index:
+    for good_list in bow_indices:
         good_list = list(filter(lambda x: len(x) <= 1, good_list))
         good_list = torch.tensor(good_list).cuda()
         num_good = good_list.shape[0]
@@ -115,8 +137,11 @@ def perturb_past(past, model, prev, args, classifier, good_index=None,
         accumulated_hidden = 0
 
     if args.decay:
-        decay_mask = torch.arange(0., 1.0 + SmallConst, 1.0 / (window_length))[
-                     1:]
+        decay_mask = torch.arange(
+            0.0,
+            1.0 + SMALL_CONST,
+            1.0 / (window_length)
+        )[1:]
     else:
         decay_mask = 1.0
 
@@ -136,8 +161,11 @@ def perturb_past(past, model, prev, args, classifier, good_index=None,
         ones_mask = decay_mask * ones_mask.permute(0, 1, 2, 4, 3)
         ones_mask = ones_mask.permute(0, 1, 2, 4, 3)
 
-        window_mask = torch.cat((ones_mask, torch.zeros(zeros_key_val_shape)),
-                                dim=-2).cuda()
+        window_mask = torch.cat(
+            (ones_mask, torch.zeros(zeros_key_val_shape)),
+            dim=-2
+        ).cuda()
+
     else:
         window_mask = torch.ones_like(past[0]).cuda()
 
@@ -199,9 +227,9 @@ def perturb_past(past, model, prev, args, classifier, good_index=None,
         kl_loss = 0.0
         if kl_scale > 0.0:
             p = (F.softmax(original_probs[:, -1, :], dim=-1))
-            p = p + SmallConst * (p <= SmallConst).type(
+            p = p + SMALL_CONST * (p <= SMALL_CONST).type(
                 torch.FloatTensor).cuda().detach()
-            correction = SmallConst * (probabs <= SmallConst).type(
+            correction = SMALL_CONST * (probabs <= SMALL_CONST).type(
                 torch.FloatTensor).cuda().detach()
             corrected_probabs = probabs + correction.detach()
             kl_loss = kl_scale * (
@@ -219,7 +247,7 @@ def perturb_past(past, model, prev, args, classifier, good_index=None,
                 for index, p_ in
                 enumerate(past_perturb)]
         else:
-            grad_norms = [(torch.norm(p_.grad * window_mask) + SmallConst) for
+            grad_norms = [(torch.norm(p_.grad * window_mask) + SMALL_CONST) for
                           index, p_ in enumerate(past_perturb)]
 
         grad = [
@@ -261,7 +289,10 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
         classifier.eval()
         if args.label_class < 0:
             raise Exception(
-                'Wrong class for sentiment, use --label-class 2 for *very positive*, 3 for *very negative*')
+                'Wrong class for sentiment, '
+                'use --label-class 2 for *very positive*, '
+                '3 for *very negative*'
+            )
         # args.label_class = 2 # very pos
         # args.label_class = 3 # very neg
 
@@ -276,21 +307,13 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
     else:
         classifier = None
 
-    # Get tokens for the list of positive words
-    def list_tokens(word_list):
-        token_list = []
-        for word in word_list:
-            token_list.append(enc.encode(" " + word))
-        return token_list
-
-    good_index = []
+    bow_indices = []
     if args.bag_of_words:
-        bags_of_words = args.bag_of_words.split(";")
-        for wordlist in bags_of_words:
-            with open(wordlist, "r") as f:
-                words = f.read()
-                words = words.split('\n')
-            good_index.append(list_tokens(words))
+        bag_of_words_paths = args.bag_of_words.split(";")
+        for bag_of_words_path in bag_of_words_paths:
+            with open(bag_of_words_path, "r") as f:
+                words = f.read().split('\n')
+            bow_indices.append([enc.encode(" " + word) for word in words])
 
     if args.bag_of_words and classifier:
         print('Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.')
@@ -307,10 +330,15 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
     else:
         raise Exception('Supply either --bag-of-words (-B) or --discrim -D')
 
-    original, _, _ = sample_from_hidden(model=model, args=args, context=context,
-                                        device=device,
-                                        perturb=False, good_index=good_index,
-                                        classifier=classifier)
+    original, _, _ = sample_from_hidden(
+        model=model,
+        args=args,
+        context=context,
+        device=device,
+        perturb=False,
+        bow_indices=bow_indices,
+        classifier=classifier
+    )
     torch.cuda.empty_cache()
 
     perturbed_list = []
@@ -318,13 +346,15 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
     loss_in_time_list = []
 
     for i in range(args.num_samples):
-        perturbed, discrim_loss, loss_in_time = sample_from_hidden(model=model,
-                                                                   args=args,
-                                                                   context=context,
-                                                                   device=device,
-                                                                   perturb=True,
-                                                                   good_index=good_index,
-                                                                   classifier=classifier)
+        perturbed, discrim_loss, loss_in_time = sample_from_hidden(
+            model=model,
+            args=args,
+            context=context,
+            device=device,
+            perturb=True,
+            bow_indices=bow_indices,
+            classifier=classifier
+        )
         perturbed_list.append(perturbed)
         if classifier is not None:
             discrim_loss_list.append(discrim_loss.data.cpu().numpy())
@@ -335,11 +365,21 @@ def latent_perturb(model, args, context=None, sample=True, device='cuda'):
     return original, perturbed_list, discrim_loss_list, loss_in_time_list
 
 
-def sample_from_hidden(model, args, classifier, context=None, past=None,
-                       device='cuda',
-                       sample=True, perturb=True, good_index=None):
-    output = torch.tensor(context, device=device, dtype=torch.long).unsqueeze(
-        0) if context else None
+def sample_from_hidden(
+        model,
+        args,
+        classifier,
+        context=None,
+        past=None,
+        device='cuda',
+        sample=True,
+        perturb=True,
+        bow_indices=None
+):
+    output = torch.tensor(
+        context,
+        device=device, dtype=torch.long
+    ).unsqueeze(0) if context else None
 
     grad_norms = None
     loss_in_time = []
@@ -374,17 +414,19 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
             accumulated_hidden = true_hidden[:, :-1, :]
             accumulated_hidden = torch.sum(accumulated_hidden, dim=1)
 
-            perturbed_past, _, grad_norms, loss_per_iter = perturb_past(past,
-                                                                        model,
-                                                                        prev,
-                                                                        args,
-                                                                        good_index=good_index,
-                                                                        stepsize=current_stepsize,
-                                                                        original_probs=original_probs,
-                                                                        true_past=true_past,
-                                                                        accumulated_hidden=accumulated_hidden,
-                                                                        classifier=classifier,
-                                                                        grad_norms=grad_norms)
+            perturbed_past, _, grad_norms, loss_per_iter = perturb_past(
+                past,
+                model,
+                prev,
+                args,
+                bow_indices=bow_indices,
+                stepsize=current_stepsize,
+                original_probs=original_probs,
+                true_past=true_past,
+                accumulated_hidden=accumulated_hidden,
+                classifier=classifier,
+                grad_norms=grad_norms
+            )
             loss_in_time.append(loss_per_iter)
 
         logits, past, all_hidden = model(prev, past=perturbed_past)
@@ -395,8 +437,11 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
         if classifier is not None:
             ce_loss = torch.nn.CrossEntropyLoss()
             predicted_sentiment = classifier(torch.mean(true_hidden, dim=1))
-            label = torch.tensor([args.label_class], device='cuda',
-                                 dtype=torch.long)
+            label = torch.tensor(
+                [args.label_class],
+                device='cuda',
+                dtype=torch.long
+            )
             true_discrim_loss = ce_loss(predicted_sentiment, label)
             print("true discrim loss", true_discrim_loss.data.cpu().numpy())
         else:
@@ -404,32 +449,32 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
 
         hidden = all_hidden[-1]  # update hidden
         # logits = model.forward_hidden(hidden)
-        logits = logits[:, -1, :] / args.temperature  # + SmallConst
+        logits = logits[:, -1, :] / args.temperature  # + SMALL_CONST
 
-        # logits = top_k_logits(logits, k=args.top_k)  # + SmallConst
+        # logits = top_k_logits(logits, k=args.top_k)  # + SMALL_CONST
 
         log_probs = F.softmax(logits, dim=-1)
 
         # Fuse the modified model and original model
         if perturb:
 
-            # original_probs = top_k_logits(original_probs[:, -1, :]) #+ SmallConst
+            # original_probs = top_k_logits(original_probs[:, -1, :]) #+ SMALL_CONST
             original_probs = F.softmax(original_probs[:, -1, :], dim=-1)
             # likelywords = torch.topk(original_probs, k=10, dim=-1)
             # print(enc.decode(likelywords[1].tolist()[0]))
 
             gm_scale = args.fusion_gm_scale
             log_probs = ((log_probs ** gm_scale) * (
-                    original_probs ** (1 - gm_scale)))  # + SmallConst
+                    original_probs ** (1 - gm_scale)))  # + SMALL_CONST
 
             log_probs = top_k_logits(log_probs, k=args.top_k,
-                                     probs=True)  # + SmallConst
+                                     probs=True)  # + SMALL_CONST
 
             if torch.sum(log_probs) <= 1:
                 log_probs = log_probs / torch.sum(log_probs)
 
         else:
-            logits = top_k_logits(logits, k=args.top_k)  # + SmallConst
+            logits = top_k_logits(logits, k=args.top_k)  # + SMALL_CONST
             log_probs = F.softmax(logits, dim=-1)
 
         if sample:
@@ -437,12 +482,15 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
             # print(enc.decode(likelywords[1].tolist()[0]))
             # print(likelywords[0].tolist())
             prev = torch.multinomial(log_probs, num_samples=1)
+
         else:
             _, prev = torch.topk(log_probs, k=1, dim=-1)
+
         # if perturb:
         #     prev = future
-        output = prev if output is None else torch.cat((output, prev),
-                                                       dim=1)  # update output
+
+        # update output
+        output = prev if output is None else torch.cat((output, prev), dim=1)
         print(enc.decode(output.tolist()[0]))
 
     return output, true_discrim_loss, loss_in_time
@@ -450,15 +498,23 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
 
 def run_model():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', '-M', type=str, default='gpt2-medium',
-                        help='pretrained model name or path to local checkpoint')
-    parser.add_argument('--bag-of-words', '-B', type=str, default=None,
-                        help='Bags of words used for PPLM-BoW. Multiple BoWs separated by ;')
-    parser.add_argument('--discrim', '-D', type=str, default=None,
-                        choices=('clickbait', 'sentiment', 'toxicity'),
-                        help='Discriminator to use for loss-type 2')
-    parser.add_argument('--label-class', type=int, default=-1,
-                        help='Class label used for the discriminator')
+    parser.add_argument(
+        '--model_path', '-M', type=str, default='gpt2-medium',
+        help='pretrained model name or path to local checkpoint'
+    )
+    parser.add_argument(
+        '--bag-of-words', '-B', type=str, default=None,
+        help='Bags of words used for PPLM-BoW. Multiple BoWs separated by ;'
+    )
+    parser.add_argument(
+        '--discrim', '-D', type=str, default=None,
+        choices=('clickbait', 'sentiment', 'toxicity'),
+        help='Discriminator to use for loss-type 2'
+    )
+    parser.add_argument(
+        '--label-class', type=int, default=-1,
+        help='Class label used for the discriminator'
+    )
     parser.add_argument('--stepsize', type=float, default=0.02)
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
@@ -467,21 +523,32 @@ def run_model():
     parser.add_argument("--fusion-gm-scale", type=float, default=0.9)
     parser.add_argument("--fusion-kl-scale", type=float, default=0.01)
     parser.add_argument('--nocuda', action='store_true', help='no cuda')
-    parser.add_argument('--uncond', action='store_true',
-                        help='Generate from end-of-text as prefix')
-    parser.add_argument("--cond-text", type=str, default='The lake',
-                        help='Prefix texts to condition on')
+    parser.add_argument(
+        '--uncond', action='store_true',
+        help='Generate from end-of-text as prefix'
+    )
+    parser.add_argument(
+        "--cond-text", type=str, default='The lake',
+        help='Prefix texts to condition on'
+    )
     parser.add_argument('--num-iterations', type=int, default=3)
     parser.add_argument('--grad-length', type=int, default=10000)
-    parser.add_argument('--num-samples', type=int, default=1,
-                        help='Number of samples to generate from the modified latents')
-    parser.add_argument('--horizon-length', type=int, default=1,
-                        help='Length of future to optimize over')
+    parser.add_argument(
+        '--num-samples', type=int, default=1,
+        help='Number of samples to generate from the modified latents')
+    parser.add_argument(
+        '--horizon-length', type=int, default=1,
+        help='Length of future to optimize over'
+    )
     # parser.add_argument('--force-token', action='store_true', help='no cuda')
-    parser.add_argument('--window-length', type=int, default=0,
-                        help='Length of past which is being optimizer; 0 corresponds to infinite window length')
-    parser.add_argument('--decay', action='store_true',
-                        help='whether to decay or not')
+    parser.add_argument(
+        '--window-length', type=int, default=0,
+        help='Length of past which is being optimizer; '
+             '0 corresponds to infinite window length')
+    parser.add_argument(
+        '--decay', action='store_true',
+        help='whether to decay or not'
+    )
     parser.add_argument('--gamma', type=float, default=1.5)
 
     args = parser.parse_args()
@@ -491,8 +558,10 @@ def run_model():
 
     device = 'cpu' if args.nocuda else 'cuda'
 
-    model = GPT2LMHeadModel.from_pretrained(args.model_path,
-                                            output_hidden_states=True)
+    model = GPT2LMHeadModel.from_pretrained(
+        args.model_path,
+        output_hidden_states=True
+    )
     model.to(device)
     model.eval()
 
@@ -502,14 +571,14 @@ def run_model():
     pass
 
     if args.uncond:
-        seq = [[50256, 50256]]
+        seq = [[MAGIC_NUMBER, MAGIC_NUMBER]]
 
     else:
         raw_text = args.cond_text
         while not raw_text:
             print('Did you forget to add `--cond-text`? ')
             raw_text = input("Model prompt >>> ")
-        seq = [[50256] + enc.encode(raw_text)]
+        seq = [[MAGIC_NUMBER] + enc.encode(raw_text)]
 
     collect_gen = dict()
     current_index = 0
@@ -520,9 +589,12 @@ def run_model():
         print(text)
         print("=" * 80)
 
-        out1, out_perturb, discrim_loss_list, loss_in_time_list = latent_perturb(
-            model=model, args=args, context=out,
-            device=device)
+        out1, out_perturb, discrim_losses, losses_in_time = latent_perturb(
+            model=model,
+            args=args,
+            context=out,
+            device=device
+        )
 
         text_whole = enc.decode(out1.tolist()[0])
 
@@ -544,7 +616,6 @@ def run_model():
                 pass
             collect_gen[current_index] = [out, out_perturb, out1]
             # Save the prefix, perturbed seq, original seq for each index
-
             current_index = current_index + 1
 
     return
