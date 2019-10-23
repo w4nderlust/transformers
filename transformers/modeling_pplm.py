@@ -17,13 +17,13 @@
 # TODO: use config_pplm.py
 # TODO: add code for training a custom discriminator
 
-'''
+"""
 Example command with bag of words:
 python modeling_pplm.py -B data/pplm/bow/space.txt --cond-text "The president" --length 100 --gamma 1.5 --num-iterations 3 --num-samples 10 --stepsize 0.01 --window-length 5 --kl-scale 0.01 --gm-scale 0.95
 
 Example command with discriminator:
 python modeling_pplm.py -D sentiment --label-class 3 --cond-text "The lake" --length 10 --gamma 1.0 --num-iterations 30 --num-samples 10 --stepsize 0.01 --kl-scale 0.01 --gm-scale 0.95
-'''
+"""
 
 import argparse
 from operator import add
@@ -40,31 +40,31 @@ from transformers.modeling_gpt2 import GPT2LMHeadModel
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
 PPLM_BOW_DISCRIM = 3
-EOS = '<|endoftext|>'
+EOS = "<|endoftext|>"
 SMALL_CONST = 1e-15
-TOKENIZER = GPT2Tokenizer.from_pretrained('gpt2-medium')
+TOKENIZER = GPT2Tokenizer.from_pretrained("gpt2-medium")
 
 discriminator_models_params = {
-    'clickbait': {
-        'path': 'data/pplm/discriminators/clickbait_classifierhead.pt',
-        'class_size': 5,
-        'embed_size': 1034,
-        'class_vocab': {'non_clickbait': 0, 'clickbait': 1},
-        'default_class': 1
+    "clickbait": {
+        "path": "data/pplm/discriminators/clickbait_classifierhead.pt",
+        "class_size": 5,
+        "embed_size": 1034,
+        "class_vocab": {"non_clickbait": 0, "clickbait": 1},
+        "default_class": 1,
     },
-    'sentiment': {
-        'path': 'data/pplm/discriminators/sentiment_classifierhead.pt',
-        'class_size': 2,
-        'embed_size': 1034,
-        'class_vocab': {'very_positive': 2, 'very_negative': 3},
-        'default_class': 3
+    "sentiment": {
+        "path": "data/pplm/discriminators/sentiment_classifierhead.pt",
+        "class_size": 2,
+        "embed_size": 1034,
+        "class_vocab": {"very_positive": 2, "very_negative": 3},
+        "default_class": 3,
     },
-    'toxicity': {
-        'path': 'data/pplm/discriminators/toxicity_classifierhead.pt',
-        'class_size': 2,
-        'embed_size': 1034,
-        'class_vocab': {'non_toxic': 0, 'toxic': 1},
-        'default_class': 0
+    "toxicity": {
+        "path": "data/pplm/discriminators/toxicity_classifierhead.pt",
+        "class_size": 2,
+        "embed_size": 1034,
+        "class_vocab": {"non_toxic": 0, "toxic": 1},
+        "default_class": 0,
     },
 }
 
@@ -78,7 +78,7 @@ class ClassificationHead(torch.nn.Module):
         self.embed_size = embed_size
         # self.mlp1 = torch.nn.Linear(embed_size, embed_size)
         # self.mlp2 = (torch.nn.Linear(embed_size, class_size))
-        self.mlp = (torch.nn.Linear(embed_size, class_size))
+        self.mlp = torch.nn.Linear(embed_size, class_size)
 
     def forward(self, hidden_state):
         # Truncated Language modeling logits (we remove the last token)
@@ -110,39 +110,33 @@ def top_k_filter(logits, k, probs=False):
 
         if probs:
             return torch.where(
-                logits < batch_mins,
-                torch.ones_like(logits) * 0.0,
-                logits
+                logits < batch_mins, torch.ones_like(logits) * 0.0, logits
             )
 
-        return torch.where(
-            logits < batch_mins,
-            torch.ones_like(logits) * -1e10,
-            logits
-        )
+        return torch.where(logits < batch_mins, torch.ones_like(logits) * -1e10, logits)
 
 
 def perturb_past(
-        past,
-        model,
-        last,
-        vocab_size=50257,
-        original_probs=None,
-        accumulated_hidden=None,
-        true_past=None,
-        grad_norms=None,
-        stepsize=0.01,
-        classifier=None,
-        label_class=None,
-        bow_indices=None,
-        loss_type=0,
-        num_iterations=3,
-        gm_scale=0.9,
-        kl_scale=0.01,
-        window_length=0,
-        horizon_length=1,
-        decay=False,
-        gamma=1.5
+    past,
+    model,
+    last,
+    vocab_size=50257,
+    original_probs=None,
+    accumulated_hidden=None,
+    true_past=None,
+    grad_norms=None,
+    stepsize=0.01,
+    classifier=None,
+    label_class=None,
+    bow_indices=None,
+    loss_type=0,
+    num_iterations=3,
+    gm_scale=0.9,
+    kl_scale=0.01,
+    window_length=0,
+    horizon_length=1,
+    decay=False,
+    gamma=1.5,
 ):
     # collect one hot vectors for bags of words
     # TODO: maybe this could be optimized by doing it only one time
@@ -157,18 +151,14 @@ def perturb_past(
 
     # Generate inital perturbed past
     past_perturb_orig = [
-        (np.random.uniform(0.0, 0.0, p.shape).astype('float32'))
-        for p in past]
+        (np.random.uniform(0.0, 0.0, p.shape).astype("float32")) for p in past
+    ]
 
     if accumulated_hidden is None:
         accumulated_hidden = 0
 
     if decay:
-        decay_mask = torch.arange(
-            0.0,
-            1.0 + SMALL_CONST,
-            1.0 / (window_length)
-        )[1:]
+        decay_mask = torch.arange(0.0, 1.0 + SMALL_CONST, 1.0 / (window_length))[1:]
     else:
         decay_mask = 1.0
 
@@ -176,21 +166,24 @@ def perturb_past(
     _, _, _, current_length, _ = past[0].shape
 
     if current_length > window_length and window_length > 0:
-        ones_key_val_shape = tuple(past[0].shape[:-2]) + tuple(
-            [window_length]) + tuple(
-            past[0].shape[-1:])
+        ones_key_val_shape = (
+            tuple(past[0].shape[:-2])
+            + tuple([window_length])
+            + tuple(past[0].shape[-1:])
+        )
 
-        zeros_key_val_shape = tuple(past[0].shape[:-2]) + tuple(
-            [current_length - window_length]) + tuple(
-            past[0].shape[-1:])
+        zeros_key_val_shape = (
+            tuple(past[0].shape[:-2])
+            + tuple([current_length - window_length])
+            + tuple(past[0].shape[-1:])
+        )
 
         ones_mask = torch.ones(ones_key_val_shape)
         ones_mask = decay_mask * ones_mask.permute(0, 1, 2, 4, 3)
         ones_mask = ones_mask.permute(0, 1, 2, 4, 3)
 
         window_mask = torch.cat(
-            (ones_mask, torch.zeros(zeros_key_val_shape)),
-            dim=-2
+            (ones_mask, torch.zeros(zeros_key_val_shape)), dim=-2
         ).cuda()
 
     else:
@@ -208,10 +201,7 @@ def perturb_past(
         # Compute hidden using perturbed past
         logits, future_past, all_hidden = model(last, past=pert_past)
         hidden = all_hidden[-1]
-        new_accumulated_hidden = accumulated_hidden + torch.sum(
-            hidden,
-                                                                dim=1
-        ).detach()
+        new_accumulated_hidden = accumulated_hidden + torch.sum(hidden, dim=1).detach()
 
         # TODO: Check the layer-norm consistency of this with trained discriminator
         # logits = model.forward_hidden(hidden)
@@ -228,7 +218,7 @@ def perturb_past(
                 # loss_word = torch.sum(loss_word) /torch.sum(one_hot_good)
                 loss += loss_word
                 loss_list.append(loss_word)
-            print('words', loss.data.cpu().numpy())
+            print("words", loss.data.cpu().numpy())
 
         if loss_type == PPLM_DISCRIM or loss_type == PPLM_BOW_DISCRIM:
             ce_loss = torch.nn.CrossEntropyLoss()
@@ -237,36 +227,38 @@ def perturb_past(
                 future_probabs = F.softmax(logits, dim=-1)  # Get softmax
                 future_probabs = torch.unsqueeze(future_probabs, dim=1)
 
-                _, new_true_past, all_hidden = model(future_probabs,
-                                                     past=new_true_past)
+                _, new_true_past, all_hidden = model(future_probabs, past=new_true_past)
                 future_hidden = all_hidden[-1]  # Get expected hidden states
                 new_accumulated_hidden = new_accumulated_hidden + torch.sum(
-                    future_hidden,
-                    dim=1
+                    future_hidden, dim=1
                 )
 
             predicted_sentiment = classifier(
                 new_accumulated_hidden / (current_length + 1 + horizon_length)
             )
 
-            label = torch.tensor([label_class], device='cuda',
-                                 dtype=torch.long)
+            label = torch.tensor([label_class], device="cuda", dtype=torch.long)
             discrim_loss = ce_loss(predicted_sentiment, label)
-            print('discrim', discrim_loss.data.cpu().numpy())
+            print("discrim", discrim_loss.data.cpu().numpy())
             loss += discrim_loss
             loss_list.append(discrim_loss)
 
         kl_loss = 0.0
         if kl_scale > 0.0:
-            p = (F.softmax(original_probs[:, -1, :], dim=-1))
-            p = p + SMALL_CONST * (p <= SMALL_CONST).type(
-                torch.FloatTensor).cuda().detach()
-            correction = SMALL_CONST * (probabs <= SMALL_CONST).type(
-                torch.FloatTensor
-            ).cuda().detach()
+            p = F.softmax(original_probs[:, -1, :], dim=-1)
+            p = (
+                p
+                + SMALL_CONST
+                * (p <= SMALL_CONST).type(torch.FloatTensor).cuda().detach()
+            )
+            correction = (
+                SMALL_CONST
+                * (probabs <= SMALL_CONST).type(torch.FloatTensor).cuda().detach()
+            )
             corrected_probabs = probabs + correction.detach()
             kl_loss = kl_scale * (
-                (corrected_probabs * (corrected_probabs / p).log()).sum())
+                (corrected_probabs * (corrected_probabs / p).log()).sum()
+            )
             # print('kl_loss', kl_loss.data.cpu().numpy())
             loss += kl_loss  # + discrim_loss
 
@@ -277,8 +269,8 @@ def perturb_past(
         if grad_norms is not None and loss_type == PPLM_BOW:
             grad_norms = [
                 torch.max(grad_norms[index], torch.norm(p_.grad * window_mask))
-                for index, p_ in
-                enumerate(past_perturb)]
+                for index, p_ in enumerate(past_perturb)
+            ]
         else:
             grad_norms = [
                 (torch.norm(p_.grad * window_mask) + SMALL_CONST)
@@ -286,9 +278,8 @@ def perturb_past(
             ]
 
         grad = [
-            -stepsize * (
-                    p_.grad * window_mask / grad_norms[index] ** gamma
-            ).data.cpu().numpy()
+            -stepsize
+            * (p_.grad * window_mask / grad_norms[index] ** gamma).data.cpu().numpy()
             for index, p_ in enumerate(past_perturb)
         ]
         past_perturb_orig = list(map(add, grad, past_perturb_orig))
@@ -315,34 +306,33 @@ def get_classifier(name, label_class, device):
 
     params = discriminator_models_params[name]
     classifier = ClassificationHead(
-        class_size=params['class_size'],
-        embed_size=params['embed_size']
+        class_size=params["class_size"], embed_size=params["embed_size"]
     ).to(device)
     # TODO why do we need this?
     classifier.eval()
 
     if isinstance(label_class, str):
-        if label_class in params['class_vocab']:
-            label_id = params['class_vocab'][label_class]
+        if label_class in params["class_vocab"]:
+            label_id = params["class_vocab"][label_class]
 
         else:
-            label_id = params['default_class']
-            print('label_class {} not in class_vocab'.format(label_class))
-            print('available values are: {}'.format(params['class_vocab']))
-            print('using default class {}'.format(label_id))
+            label_id = params["default_class"]
+            print("label_class {} not in class_vocab".format(label_class))
+            print("available values are: {}".format(params["class_vocab"]))
+            print("using default class {}".format(label_id))
 
     elif isinstance(label_class, int):
-        if label_class in set(params['class_vocab'].values()):
+        if label_class in set(params["class_vocab"].values()):
             label_id = label_class
 
         else:
-            label_id = params['default_class']
-            print('label_class {} not in class_vocab'.format(label_class))
-            print('available values are: {}'.format(params['class_vocab']))
-            print('using default class {}'.format(label_id))
+            label_id = params["default_class"]
+            print("label_class {} not in class_vocab".format(label_class))
+            print("available values are: {}".format(params["class_vocab"]))
+            print("using default class {}".format(label_id))
 
     else:
-        label_id = params['default_class']
+        label_id = params["default_class"]
 
     return classifier, label_id
 
@@ -351,47 +341,36 @@ def get_bag_of_words_indices(bag_of_words_paths):
     bow_indices = []
     for bag_of_words_path in bag_of_words_paths:
         with open(bag_of_words_path, "r") as f:
-            words = f.read().split('\n')
+            words = f.read().split("\n")
         # TODO: why space concat?
         bow_indices.append([TOKENIZER.encode(" " + word) for word in words])
     return bow_indices
 
 
-def full_text_generation(
-        model,
-        args,
-        context=None,
-        sample=True,
-        device='cuda'
-):
-    classifier, class_id = get_classifier(args.discrim, args.label_class,
-                                          device)
+def full_text_generation(model, args, context=None, sample=True, device="cuda"):
+    classifier, class_id = get_classifier(args.discrim, args.label_class, device)
 
     bow_indices = []
     if args.bag_of_words:
         bow_indices = get_bag_of_words_indices(args.bag_of_words.split(";"))
 
     if args.bag_of_words and classifier:
-        print('Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.')
+        print("Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.")
         loss_type = PPLM_BOW_DISCRIM
 
     elif args.bag_of_words:
         loss_type = PPLM_BOW
-        print('Using PPLM-BoW')
+        print("Using PPLM-BoW")
 
     elif classifier is not None:
         loss_type = PPLM_DISCRIM
-        print('Using PPLM-Discrim')
+        print("Using PPLM-Discrim")
 
     else:
-        raise Exception('Specify either --bag-of-words (-B) or --discrim (-D)')
+        raise Exception("Specify either --bag-of-words (-B) or --discrim (-D)")
 
     unpert_gen_tok_text, _, _ = generate_text_pplm(
-        model=model,
-        context=context,
-        device=device,
-        length=args.length,
-        perturb=False
+        model=model, context=context, device=device, length=args.length, perturb=False
     )
     torch.cuda.empty_cache()
 
@@ -421,7 +400,7 @@ def full_text_generation(
             window_length=args.window_length,
             horizon_length=args.horizon_length,
             decay=args.decay,
-            gamma=args.gamma
+            gamma=args.gamma,
         )
         pert_gen_tok_texts.append(pert_gen_tok_text)
         if classifier is not None:
@@ -434,33 +413,34 @@ def full_text_generation(
 
 
 def generate_text_pplm(
-        model,
-        context=None,
-        past=None,
-        device='cuda',
-        sample=True,
-        perturb=True,
-        classifier=None,
-        label_class=None,
-        bow_indices=None,
-        loss_type=0,
-        length=100,
-        grad_length=10000,
-        stepsize=0.02,
-        num_iterations=3,
-        temperature=1.0,
-        gm_scale=0.9,
-        kl_scale=0.01,
-        top_k=10,
-        window_length=0,
-        horizon_length=1,
-        decay=False,
-        gamma=1.5
+    model,
+    context=None,
+    past=None,
+    device="cuda",
+    sample=True,
+    perturb=True,
+    classifier=None,
+    label_class=None,
+    bow_indices=None,
+    loss_type=0,
+    length=100,
+    grad_length=10000,
+    stepsize=0.02,
+    num_iterations=3,
+    temperature=1.0,
+    gm_scale=0.9,
+    kl_scale=0.01,
+    top_k=10,
+    window_length=0,
+    horizon_length=1,
+    decay=False,
+    gamma=1.5,
 ):
-    output_so_far = torch.tensor(
-        context,
-        device=device, dtype=torch.long
-    ).unsqueeze(0) if context else None
+    output_so_far = (
+        torch.tensor(context, device=device, dtype=torch.long).unsqueeze(0)
+        if context
+        else None
+    )
 
     grad_norms = None
     last = None
@@ -517,7 +497,7 @@ def generate_text_pplm(
                 window_length=window_length,
                 horizon_length=horizon_length,
                 decay=decay,
-                gamma=gamma
+                gamma=gamma,
             )
             loss_in_time.append(loss_this_iter)
 
@@ -527,14 +507,8 @@ def generate_text_pplm(
 
         # compute the discriminator loss using unperturbed hidden
         if classifier is not None:
-            prediction = classifier(
-                torch.mean(unpert_last_hidden, dim=1)
-            )
-            label = torch.tensor(
-                [label_class],
-                device='cuda',
-                dtype=torch.long
-            )
+            prediction = classifier(torch.mean(unpert_last_hidden, dim=1))
+            label = torch.tensor([label_class], device="cuda", dtype=torch.long)
             unpert_discrim_loss = torch.nn.CrossEntropyLoss()(prediction, label)
             print("unperturbed discrim loss", unpert_discrim_loss.data.cpu().numpy())
 
@@ -546,16 +520,11 @@ def generate_text_pplm(
             unpert_probs = F.softmax(unpert_logits[:, -1, :], dim=-1)
 
             gm_scale = gm_scale
-            pert_probs = (
-                    (pert_probs ** gm_scale) *
-                    (unpert_probs ** (1 - gm_scale))
+            pert_probs = (pert_probs ** gm_scale) * (
+                unpert_probs ** (1 - gm_scale)
             )  # + SMALL_CONST
 
-            pert_probs = top_k_filter(
-                pert_probs,
-                k=top_k,
-                probs=True
-            )  # + SMALL_CONST
+            pert_probs = top_k_filter(pert_probs, k=top_k, probs=True)  # + SMALL_CONST
 
             # rescale
             if torch.sum(pert_probs) <= 1:
@@ -573,7 +542,9 @@ def generate_text_pplm(
             _, last = torch.topk(pert_probs, k=1, dim=-1)
 
         # update context/output_so_far appending the new token
-        output_so_far = last if output_so_far is None else torch.cat((output_so_far, last), dim=1)
+        output_so_far = (
+            last if output_so_far is None else torch.cat((output_so_far, last), dim=1)
+        )
         print(TOKENIZER.decode(output_so_far.tolist()[0]))
 
     return output_so_far, unpert_discrim_loss, loss_in_time
@@ -582,56 +553,70 @@ def generate_text_pplm(
 def run_model():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--model_path', '-M', type=str, default='gpt2-medium',
-        help='pretrained model name or path to local checkpoint'
+        "--model_path",
+        "-M",
+        type=str,
+        default="gpt2-medium",
+        help="pretrained model name or path to local checkpoint",
     )
     parser.add_argument(
-        '--bag-of-words', '-B', type=str, default=None,
-        help='Bags of words used for PPLM-BoW. Multiple BoWs separated by ;'
+        "--bag-of-words",
+        "-B",
+        type=str,
+        default=None,
+        help="Bags of words used for PPLM-BoW. Multiple BoWs separated by ;",
     )
     parser.add_argument(
-        '--discrim', '-D', type=str, default=None,
-        choices=('clickbait', 'sentiment', 'toxicity'),
-        help='Discriminator to use for loss-type 2'
+        "--discrim",
+        "-D",
+        type=str,
+        default=None,
+        choices=("clickbait", "sentiment", "toxicity"),
+        help="Discriminator to use for loss-type 2",
     )
     parser.add_argument(
-        '--label-class', type=int, default=-1,
-        help='Class label used for the discriminator'
+        "--label-class",
+        type=int,
+        default=-1,
+        help="Class label used for the discriminator",
     )
-    parser.add_argument('--stepsize', type=float, default=0.02)
+    parser.add_argument("--stepsize", type=float, default=0.02)
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--gm-scale", type=float, default=0.9)
     parser.add_argument("--kl-scale", type=float, default=0.01)
-    parser.add_argument('--nocuda', action='store_true', help='no cuda')
+    parser.add_argument("--nocuda", action="store_true", help="no cuda")
     parser.add_argument(
-        '--uncond', action='store_true',
-        help='Generate from end-of-text as prefix'
+        "--uncond", action="store_true", help="Generate from end-of-text as prefix"
     )
     parser.add_argument(
-        "--cond-text", type=str, default='The lake',
-        help='Prefix texts to condition on'
+        "--cond-text", type=str, default="The lake", help="Prefix texts to condition on"
     )
-    parser.add_argument('--num-iterations', type=int, default=3)
-    parser.add_argument('--grad-length', type=int, default=10000)
+    parser.add_argument("--num-iterations", type=int, default=3)
+    parser.add_argument("--grad-length", type=int, default=10000)
     parser.add_argument(
-        '--num-samples', type=int, default=1,
-        help='Number of samples to generate from the modified latents')
-    parser.add_argument(
-        '--horizon-length', type=int, default=1,
-        help='Length of future to optimize over'
+        "--num-samples",
+        type=int,
+        default=1,
+        help="Number of samples to generate from the modified latents",
     )
     parser.add_argument(
-        '--window-length', type=int, default=0,
-        help='Length of past which is being optimizer; '
-             '0 corresponds to infinite window length')
-    parser.add_argument(
-        '--decay', action='store_true',
-        help='whether to decay or not'
+        "--horizon-length",
+        type=int,
+        default=1,
+        help="Length of future to optimize over",
     )
-    parser.add_argument('--gamma', type=float, default=1.5)
+    parser.add_argument(
+        "--window-length",
+        type=int,
+        default=0,
+        help="Length of past which is being optimizer; "
+        "0 corresponds to infinite window length",
+    )
+    parser.add_argument("--decay", action="store_true", help="whether to decay or not")
+    parser.add_argument("--gamma", type=float, default=1.5)
 
     args = parser.parse_args()
 
@@ -640,13 +625,10 @@ def run_model():
     np.random.seed(args.seed)
 
     # set the device
-    device = 'cpu' if args.nocuda else 'cuda'
+    device = "cpu" if args.nocuda else "cuda"
 
     # load pretrained model
-    model = GPT2LMHeadModel.from_pretrained(
-        args.model_path,
-        output_hidden_states=True
-    )
+    model = GPT2LMHeadModel.from_pretrained(args.model_path, output_hidden_states=True)
     model.to(device)
     # TODO: why is this needed?
     model.eval()
@@ -664,7 +646,7 @@ def run_model():
     else:
         raw_text = args.cond_text
         while not raw_text:
-            print('Did you forget to add `--cond-text`? ')
+            print("Did you forget to add `--cond-text`? ")
             raw_text = input("Model prompt >>> ")
         tokenized_cond_text = TOKENIZER.encode(EOS + raw_text)
 
@@ -677,10 +659,7 @@ def run_model():
     # latent_perturb returns:
     # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
     unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
-        model=model,
-        args=args,
-        context=tokenized_cond_text,
-        device=device
+        model=model, args=args, context=tokenized_cond_text, device=device
     )
 
     # untokenize unperturbed text
@@ -714,5 +693,5 @@ def run_model():
     return
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_model()
