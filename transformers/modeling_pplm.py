@@ -19,10 +19,10 @@
 
 '''
 Example command with bag of words:
-python modeling_pplm.py -B data/pplm/bow/space.txt --cond-text "The president" --length 100 --gamma 1.5 --num-iterations 3 --num-samples 10 --stepsize 0.01 --window-length 5 --fusion-kl-scale 0.01 --fusion-gm-scale 0.95
+python modeling_pplm.py -B data/pplm/bow/space.txt --cond-text "The president" --length 100 --gamma 1.5 --num-iterations 3 --num-samples 10 --stepsize 0.01 --window-length 5 --kl-scale 0.01 --gm-scale 0.95
 
 Example command with discriminator:
-python modeling_pplm.py -D sentiment --label-class 3 --cond-text "The lake" --length 10 --gamma 1.0 --num-iterations 30 --num-samples 10 --stepsize 0.01 --fusion-kl-scale 0.01 --fusion-gm-scale 0.95
+python modeling_pplm.py -D sentiment --label-class 3 --cond-text "The lake" --length 10 --gamma 1.0 --num-iterations 30 --num-samples 10 --stepsize 0.01 --kl-scale 0.01 --gm-scale 0.95
 '''
 
 import argparse
@@ -37,6 +37,9 @@ from tqdm import trange
 from transformers import GPT2Tokenizer
 from transformers.modeling_gpt2 import GPT2LMHeadModel
 
+PPLM_BOW = 1
+PPLM_DISCRIM = 2
+PPLM_BOW_DISCRIM = 3
 EOS = '<|endoftext|>'
 SMALL_CONST = 1e-15
 TOKENIZER = GPT2Tokenizer.from_pretrained('gpt2-medium')
@@ -122,7 +125,7 @@ def top_k_filter(logits, k, probs=False):
 def perturb_past(
         past,
         model,
-        prev,
+        last,
         vocab_size=50257,
         original_probs=None,
         accumulated_hidden=None,
@@ -134,24 +137,23 @@ def perturb_past(
         bow_indices=None,
         loss_type=0,
         num_iterations=3,
-        fusion_gm_scale=0.9,
-        fusion_kl_scale=0.01,
+        gm_scale=0.9,
+        kl_scale=0.01,
         window_length=0,
         horizon_length=1,
         decay=False,
         gamma=1.5
 ):
-    window_length = window_length
-    gm_scale, kl_scale = fusion_gm_scale, fusion_kl_scale
-
-    one_hot_vectors = []
-    for good_list in bow_indices:
-        good_list = list(filter(lambda x: len(x) <= 1, good_list))
-        good_list = torch.tensor(good_list).cuda()
-        num_good = good_list.shape[0]
-        one_hot_good = torch.zeros(num_good, vocab_size).cuda()
-        one_hot_good.scatter_(1, good_list, 1)
-        one_hot_vectors.append(one_hot_good)
+    # collect one hot vectors for bags of words
+    # TODO: maybe this could be optimized by doing it only one time
+    one_hot_bows_vectors = []
+    for single_bow in bow_indices:
+        single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
+        single_bow = torch.tensor(single_bow).cuda()
+        num_words = single_bow.shape[0]
+        one_hot_bow = torch.zeros(num_words, vocab_size).cuda()
+        one_hot_bow.scatter_(1, single_bow, 1)
+        one_hot_bows_vectors.append(one_hot_bow)
 
     # Generate inital perturbed past
     past_perturb_orig = [
@@ -204,10 +206,12 @@ def perturb_past(
         _, _, _, current_length, _ = past_perturb[0].shape
 
         # Compute hidden using perturbed past
-        logits, future_past, all_hidden = model(prev, past=pert_past)
+        logits, future_past, all_hidden = model(last, past=pert_past)
         hidden = all_hidden[-1]
-        new_accumulated_hidden = accumulated_hidden + torch.sum(hidden,
-                                                                dim=1).detach()
+        new_accumulated_hidden = accumulated_hidden + torch.sum(
+            hidden,
+                                                                dim=1
+        ).detach()
 
         # TODO: Check the layer-norm consistency of this with trained discriminator
         # logits = model.forward_hidden(hidden)
@@ -215,8 +219,8 @@ def perturb_past(
         probabs = F.softmax(logits, dim=-1)
         loss = 0.0
         loss_list = []
-        if loss_type == 1 or loss_type == 3:
-            for one_hot_good in one_hot_vectors:
+        if loss_type == PPLM_BOW or loss_type == PPLM_BOW_DISCRIM:
+            for one_hot_good in one_hot_bows_vectors:
                 good_logits = torch.mm(probabs, torch.t(one_hot_good))
                 loss_word = good_logits
                 loss_word = torch.sum(loss_word)
@@ -226,7 +230,7 @@ def perturb_past(
                 loss_list.append(loss_word)
             print('words', loss.data.cpu().numpy())
 
-        if loss_type == 2 or loss_type == 3:
+        if loss_type == PPLM_DISCRIM or loss_type == PPLM_BOW_DISCRIM:
             ce_loss = torch.nn.CrossEntropyLoss()
             new_true_past = true_past
             for i in range(horizon_length):
@@ -237,10 +241,13 @@ def perturb_past(
                                                      past=new_true_past)
                 future_hidden = all_hidden[-1]  # Get expected hidden states
                 new_accumulated_hidden = new_accumulated_hidden + torch.sum(
-                    future_hidden, dim=1)
+                    future_hidden,
+                    dim=1
+                )
 
-            predicted_sentiment = classifier(new_accumulated_hidden / (
-                    current_length + 1 + horizon_length))
+            predicted_sentiment = classifier(
+                new_accumulated_hidden / (current_length + 1 + horizon_length)
+            )
 
             label = torch.tensor([label_class], device='cuda',
                                  dtype=torch.long)
@@ -255,7 +262,8 @@ def perturb_past(
             p = p + SMALL_CONST * (p <= SMALL_CONST).type(
                 torch.FloatTensor).cuda().detach()
             correction = SMALL_CONST * (probabs <= SMALL_CONST).type(
-                torch.FloatTensor).cuda().detach()
+                torch.FloatTensor
+            ).cuda().detach()
             corrected_probabs = probabs + correction.detach()
             kl_loss = kl_scale * (
                 (corrected_probabs * (corrected_probabs / p).log()).sum())
@@ -266,19 +274,23 @@ def perturb_past(
 
         loss_per_iter.append(loss.data.cpu().numpy())
         loss.backward()
-        if grad_norms is not None and loss_type == 1:
+        if grad_norms is not None and loss_type == PPLM_BOW:
             grad_norms = [
                 torch.max(grad_norms[index], torch.norm(p_.grad * window_mask))
                 for index, p_ in
                 enumerate(past_perturb)]
         else:
-            grad_norms = [(torch.norm(p_.grad * window_mask) + SMALL_CONST) for
-                          index, p_ in enumerate(past_perturb)]
+            grad_norms = [
+                (torch.norm(p_.grad * window_mask) + SMALL_CONST)
+                for index, p_ in enumerate(past_perturb)
+            ]
 
         grad = [
-            -stepsize * (p_.grad * window_mask / grad_norms[
-                index] ** gamma).data.cpu().numpy()
-            for index, p_ in enumerate(past_perturb)]
+            -stepsize * (
+                    p_.grad * window_mask / grad_norms[index] ** gamma
+            ).data.cpu().numpy()
+            for index, p_ in enumerate(past_perturb)
+        ]
         past_perturb_orig = list(map(add, grad, past_perturb_orig))
 
         for p_ in past_perturb:
@@ -361,18 +373,17 @@ def full_text_generation(
 
     if args.bag_of_words and classifier:
         print('Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.')
-        loss_type = 3
+        loss_type = PPLM_BOW_DISCRIM
 
     elif args.bag_of_words:
-        loss_type = 1
+        loss_type = PPLM_BOW
         print('Using PPLM-BoW')
 
     elif classifier is not None:
-        loss_type = 2
+        loss_type = PPLM_DISCRIM
         print('Using PPLM-Discrim')
 
     else:
-        loss_type = 0
         raise Exception('Specify either --bag-of-words (-B) or --discrim (-D)')
 
     unpert_gen_tok_text, _, _ = generate_text_pplm(
@@ -404,8 +415,8 @@ def full_text_generation(
             stepsize=args.stepsize,
             num_iterations=args.num_iterations,
             temperature=args.temperature,
-            fusion_gm_scale=args.fusion_gm_scale,
-            fusion_kl_scale=args.fusion_kl_scale,
+            gm_scale=args.gm_scale,
+            kl_scale=args.kl_scale,
             top_k=args.top_k,
             window_length=args.window_length,
             horizon_length=args.horizon_length,
@@ -438,8 +449,8 @@ def generate_text_pplm(
         stepsize=0.02,
         num_iterations=3,
         temperature=1.0,
-        fusion_gm_scale=0.9,
-        fusion_kl_scale=0.01,
+        gm_scale=0.9,
+        kl_scale=0.01,
         top_k=10,
         window_length=0,
         horizon_length=1,
@@ -501,8 +512,8 @@ def generate_text_pplm(
                 bow_indices=bow_indices,
                 loss_type=loss_type,
                 num_iterations=num_iterations,
-                fusion_gm_scale=fusion_gm_scale,
-                fusion_kl_scale=fusion_kl_scale,
+                gm_scale=gm_scale,
+                kl_scale=kl_scale,
                 window_length=window_length,
                 horizon_length=horizon_length,
                 decay=decay,
@@ -534,7 +545,7 @@ def generate_text_pplm(
         if perturb:
             unpert_probs = F.softmax(unpert_logits[:, -1, :], dim=-1)
 
-            gm_scale = fusion_gm_scale
+            gm_scale = gm_scale
             pert_probs = (
                     (pert_probs ** gm_scale) *
                     (unpert_probs ** (1 - gm_scale))
@@ -592,8 +603,8 @@ def run_model():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=10)
-    parser.add_argument("--fusion-gm-scale", type=float, default=0.9)
-    parser.add_argument("--fusion-kl-scale", type=float, default=0.01)
+    parser.add_argument("--gm-scale", type=float, default=0.9)
+    parser.add_argument("--kl-scale", type=float, default=0.01)
     parser.add_argument('--nocuda', action='store_true', help='no cuda')
     parser.add_argument(
         '--uncond', action='store_true',
