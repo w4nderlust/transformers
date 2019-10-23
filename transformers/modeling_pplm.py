@@ -40,7 +40,6 @@ from transformers.modeling_gpt2 import GPT2LMHeadModel
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
 PPLM_BOW_DISCRIM = 3
-EOS = "<|endoftext|>"
 SMALL_CONST = 1e-15
 TOKENIZER = GPT2Tokenizer.from_pretrained("gpt2-medium")
 
@@ -641,14 +640,15 @@ def run_model():
     # figure out conditioning text
     if args.uncond:
         # TODO: Why two tokens?
-        tokenized_cond_text = TOKENIZER.encode([EOS, EOS])
-
+        tokenized_cond_text = TOKENIZER.encode(
+            [TOKENIZER.eos_token, TOKENIZER.eos_token]
+        )
     else:
         raw_text = args.cond_text
         while not raw_text:
             print("Did you forget to add `--cond-text`? ")
             raw_text = input("Model prompt >>> ")
-        tokenized_cond_text = TOKENIZER.encode(EOS + raw_text)
+        tokenized_cond_text = TOKENIZER.encode(TOKENIZER.eos_token + raw_text)
 
     print("= Prefix of sentence =")
     print(TOKENIZER.decode(tokenized_cond_text))
