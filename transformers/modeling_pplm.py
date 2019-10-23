@@ -19,14 +19,15 @@
 
 """
 Example command with bag of words:
-python modeling_pplm.py -B data/pplm/bow/space.txt --cond-text "The president" --length 100 --gamma 1.5 --num-iterations 3 --num-samples 10 --stepsize 0.01 --window-length 5 --kl-scale 0.01 --gm-scale 0.95
+python modeling_pplm.py -B data/pplm/bow/space.txt --cond_text "The president" --length 100 --gamma 1.5 --num_iterations 3 --num_samples 10 --stepsize 0.01 --window_length 5 --kl-scale 0.01 --gm-scale 0.95
 
 Example command with discriminator:
-python modeling_pplm.py -D sentiment --label-class 3 --cond-text "The lake" --length 10 --gamma 1.0 --num-iterations 30 --num-samples 10 --stepsize 0.01 --kl-scale 0.01 --gm-scale 0.95
+python modeling_pplm.py -D sentiment --label_class 3 --cond_text "The lake" --length 10 --gamma 1.0 --num_iterations 30 --num_samples 10 --stepsize 0.01 --kl-scale 0.01 --gm-scale 0.95
 """
 
 import argparse
 from operator import add
+from typing import Optional, Tuple, Union, List
 
 import numpy as np
 import torch
@@ -299,7 +300,9 @@ def perturb_past(
     return pert_past, new_accumulated_hidden, grad_norms, loss_per_iter
 
 
-def get_classifier(name, label_class, device):
+def get_classifier(
+    name: Optional[str], label_class: Union[str, int], device: str
+) -> Tuple[Optional[ClassificationHead], Optional[int]]:
     if name is None:
         return None, None
 
@@ -313,7 +316,6 @@ def get_classifier(name, label_class, device):
     if isinstance(label_class, str):
         if label_class in params["class_vocab"]:
             label_id = params["class_vocab"][label_class]
-
         else:
             label_id = params["default_class"]
             print("label_class {} not in class_vocab".format(label_class))
@@ -323,7 +325,6 @@ def get_classifier(name, label_class, device):
     elif isinstance(label_class, int):
         if label_class in set(params["class_vocab"].values()):
             label_id = label_class
-
         else:
             label_id = params["default_class"]
             print("label_class {} not in class_vocab".format(label_class))
@@ -336,7 +337,7 @@ def get_classifier(name, label_class, device):
     return classifier, label_id
 
 
-def get_bag_of_words_indices(bag_of_words_paths):
+def get_bag_of_words_indices(bag_of_words_paths: List[str]) -> List[int]:
     bow_indices = []
     for bag_of_words_path in bag_of_words_paths:
         with open(bag_of_words_path, "r") as f:
@@ -366,7 +367,7 @@ def full_text_generation(model, args, context=None, sample=True, device="cuda"):
         print("Using PPLM-Discrim")
 
     else:
-        raise Exception("Specify either --bag-of-words (-B) or --discrim (-D)")
+        raise Exception("Specify either --bag_of_words (-B) or --discrim (-D)")
 
     unpert_gen_tok_text, _, _ = generate_text_pplm(
         model=model, context=context, device=device, length=args.length, perturb=False
@@ -510,7 +511,6 @@ def generate_text_pplm(
             label = torch.tensor([label_class], device="cuda", dtype=torch.long)
             unpert_discrim_loss = torch.nn.CrossEntropyLoss()(prediction, label)
             print("unperturbed discrim loss", unpert_discrim_loss.data.cpu().numpy())
-
         else:
             unpert_discrim_loss = 0
 
@@ -559,7 +559,7 @@ def run_model():
         help="pretrained model name or path to local checkpoint",
     )
     parser.add_argument(
-        "--bag-of-words",
+        "--bag_of_words",
         "-B",
         type=str,
         default=None,
@@ -574,7 +574,7 @@ def run_model():
         help="Discriminator to use for loss-type 2",
     )
     parser.add_argument(
-        "--label-class",
+        "--label_class",
         type=int,
         default=-1,
         help="Class label used for the discriminator",
@@ -591,27 +591,27 @@ def run_model():
         "--uncond", action="store_true", help="Generate from end-of-text as prefix"
     )
     parser.add_argument(
-        "--cond-text", type=str, default="The lake", help="Prefix texts to condition on"
+        "--cond_text", type=str, default="The lake", help="Prefix texts to condition on"
     )
-    parser.add_argument("--num-iterations", type=int, default=3)
+    parser.add_argument("--num_iterations", type=int, default=3)
     parser.add_argument("--grad-length", type=int, default=10000)
     parser.add_argument(
-        "--num-samples",
+        "--num_samples",
         type=int,
         default=1,
         help="Number of samples to generate from the modified latents",
     )
     parser.add_argument(
-        "--horizon-length",
+        "--horizon_length",
         type=int,
         default=1,
         help="Length of future to optimize over",
     )
     parser.add_argument(
-        "--window-length",
+        "--window_length",
         type=int,
         default=0,
-        help="Length of past which is being optimizer; "
+        help="Length of past which is being optimized; "
         "0 corresponds to infinite window length",
     )
     parser.add_argument("--decay", action="store_true", help="whether to decay or not")
@@ -635,7 +635,6 @@ def run_model():
     # freeze GPT-2 weights
     for param in model.parameters():
         param.requires_grad = False
-    pass
 
     # figure out conditioning text
     if args.uncond:
@@ -646,7 +645,7 @@ def run_model():
     else:
         raw_text = args.cond_text
         while not raw_text:
-            print("Did you forget to add `--cond-text`? ")
+            print("Did you forget to add `--cond_text`? ")
             raw_text = input("Model prompt >>> ")
         tokenized_cond_text = TOKENIZER.encode(TOKENIZER.eos_token + raw_text)
 
