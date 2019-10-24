@@ -483,7 +483,9 @@ def generate_text_pplm(
         # run model forward to obtain unperturbed
         if past is None and output_so_far is not None:
             last = output_so_far[:, -1:]
-            _, past, _ = model(output_so_far[:, :-1])
+            if output_so_far.shape[1] > 1:
+                _, past, _ = model(output_so_far[:, :-1])
+
             unpert_logits, unpert_past, unpert_all_hidden = model(output_so_far)
             unpert_last_hidden = unpert_all_hidden[-1]
 
@@ -505,27 +507,30 @@ def generate_text_pplm(
             accumulated_hidden = unpert_last_hidden[:, :-1, :]
             accumulated_hidden = torch.sum(accumulated_hidden, dim=1)
 
-            pert_past, _, grad_norms, loss_this_iter = perturb_past(
-                past,
-                model,
-                last,
-                unpert_past=unpert_past,
-                unpert_logits=unpert_logits,
-                accumulated_hidden=accumulated_hidden,
-                grad_norms=grad_norms,
-                stepsize=current_stepsize,
-                classifier=classifier,
-                label_class=label_class,
-                bow_indices=bow_indices,
-                loss_type=loss_type,
-                num_iterations=num_iterations,
-                kl_scale=kl_scale,
-                window_length=window_length,
-                horizon_length=horizon_length,
-                decay=decay,
-                gamma=gamma,
-            )
-            loss_in_time.append(loss_this_iter)
+            if past is not None:
+                pert_past, _, grad_norms, loss_this_iter = perturb_past(
+                    past,
+                    model,
+                    last,
+                    unpert_past=unpert_past,
+                    unpert_logits=unpert_logits,
+                    accumulated_hidden=accumulated_hidden,
+                    grad_norms=grad_norms,
+                    stepsize=current_stepsize,
+                    classifier=classifier,
+                    label_class=label_class,
+                    bow_indices=bow_indices,
+                    loss_type=loss_type,
+                    num_iterations=num_iterations,
+                    kl_scale=kl_scale,
+                    window_length=window_length,
+                    horizon_length=horizon_length,
+                    decay=decay,
+                    gamma=gamma,
+                )
+                loss_in_time.append(loss_this_iter)
+            else:
+                pert_past = past
 
         pert_logits, past, pert_all_hidden = model(last, past=pert_past)
         pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
@@ -672,9 +677,8 @@ def run_model():
 
     # figure out conditioning text
     if args.uncond:
-        # TODO: figure out why it crashes with
         tokenized_cond_text = TOKENIZER.encode(
-            [TOKENIZER.bos_token, TOKENIZER.bos_token]
+            [TOKENIZER.bos_token]
         )
     else:
         raw_text = args.cond_text
