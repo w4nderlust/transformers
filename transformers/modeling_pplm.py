@@ -153,10 +153,8 @@ def perturb_past(
         one_hot_bows_vectors.append(one_hot_bow)
 
     # initializie perturbation accumulator
-    # TODO why random between 0 and 0?
     perturbation_accumulator = [
-        # (np.zeros(p.shape).astype("float32"))
-        (np.random.uniform(0.0, 0.0, p.shape).astype("float32"))
+        (np.zeros(p.shape).astype("float32"))
         for p in past
     ]
 
@@ -366,10 +364,7 @@ def get_bag_of_words_indices(bag_of_words_paths: List[str]) -> List[int]:
     for bag_of_words_path in bag_of_words_paths:
         with open(bag_of_words_path, "r") as f:
             words = f.read().split("\n")
-        # todo improve this comment (PIERO)
-        # we are adding a space before word because those are words
-        # inside sentences for the gpt2 tokenizer
-        bow_indices.append([TOKENIZER.encode(" " + word) for word in words])
+        bow_indices.append([TOKENIZER.encode(word) for word in words])
     return bow_indices
 
 
@@ -677,16 +672,16 @@ def run_model():
 
     # figure out conditioning text
     if args.uncond:
-        # TODO: Why two tokens? (SUMANTH)
+        # TODO: figure out why it crashes with
         tokenized_cond_text = TOKENIZER.encode(
-            [TOKENIZER.eos_token, TOKENIZER.eos_token]
+            [TOKENIZER.bos_token, TOKENIZER.bos_token]
         )
     else:
         raw_text = args.cond_text
         while not raw_text:
             print("Did you forget to add `--cond_text`? ")
             raw_text = input("Model prompt >>> ")
-        tokenized_cond_text = TOKENIZER.encode(TOKENIZER.eos_token + raw_text)
+        tokenized_cond_text = TOKENIZER.encode(TOKENIZER.bos_token + raw_text)
 
     print("= Prefix of sentence =")
     print(TOKENIZER.decode(tokenized_cond_text))
