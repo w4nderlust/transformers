@@ -81,9 +81,6 @@ class ClassificationHead(torch.nn.Module):
         self.mlp = torch.nn.Linear(embed_size, class_size)
 
     def forward(self, hidden_state):
-        # TODO maybe remove next two lines
-        # Truncated Language modeling logits (we remove the last token)
-        # hidden_state = hidden_state[:, :-1].contiguous().view(-1, self.n_embd)
         # hidden_state = F.relu(self.mlp1(hidden_state))
         # hidden_state = self.mlp2(hidden_state)
         logits = self.mlp(hidden_state)
@@ -145,7 +142,7 @@ def perturb_past(
         gamma=1.5,
 ):
     # collect one hot vectors for bags of words
-    # TODO: maybe this could be optimized by doing it only one time
+    # todo: make this into a function and move outside for efficiency
     one_hot_bows_vectors = []
     for single_bow in bow_indices:
         single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
@@ -158,6 +155,7 @@ def perturb_past(
     # initializie perturbation accumulator
     # TODO why random between 0 and 0?
     perturbation_accumulator = [
+        # (np.zeros(p.shape).astype("float32"))
         (np.random.uniform(0.0, 0.0, p.shape).astype("float32"))
         for p in past
     ]
@@ -174,10 +172,9 @@ def perturb_past(
     else:
         decay_mask = 1.0
 
-    # TODO fix this comment
-    # generate a mask is gradient perturbated is based on a past window
+    # TODO fix this comment (SUMANTH)
+    # generate a mask if perturbated gradient is based on a past window
     _, _, _, curr_length, _ = past[0].shape
-
     if curr_length > window_length and window_length > 0:
         ones_key_val_shape = (
                 tuple(past[0].shape[:-2])
@@ -218,7 +215,6 @@ def perturb_past(
         all_logits, _, all_hidden = model(last, past=curr_pert_past)
         hidden = all_hidden[-1]
         accumulated_hidden += torch.sum(hidden, dim=1).detach()
-        # TODO: Check the layer-norm consistency of this with trained discriminator
         logits = all_logits[:, -1, :]
         probs = F.softmax(logits, dim=-1)
 
@@ -235,6 +231,7 @@ def perturb_past(
 
         if loss_type == PPLM_DISCRIM or loss_type == PPLM_BOW_DISCRIM:
             ce_loss = torch.nn.CrossEntropyLoss()
+            # TODO all there are (SUMANTH)
             # TODO why we need to do this assignment and not just using unpert_past?
             curr_unpert_past = unpert_past
             # TODO i is never used, why do we need to do this i times instead multiplying
@@ -243,6 +240,7 @@ def perturb_past(
                 # TODO the next two lines can be done only one time, and why not using probs instead as they do not change at each iteration?
                 curr_probs = F.softmax(logits, dim=-1)  # get softmax
                 curr_probs = torch.unsqueeze(curr_probs, dim=1)
+                # todo modify model to work with probs probs
                 _, curr_unpert_past, curr_all_hidden = model(
                     curr_probs,
                     past=curr_unpert_past
@@ -306,13 +304,11 @@ def perturb_past(
         # accumulate gradients
         perturbation_accumulator = list(map(add, grad, perturbation_accumulator))
 
-        # TODO explain why we need this
-        # reset gradients
+        # reset gradients, just to make sure
         for p_ in curr_perturbation:
             p_.grad.data.zero_()
 
-        # TODO explain why we need this
-        # reset past
+        # removing past from the graph
         new_past = []
         for p_ in past:
             new_past.append(p_.detach())
@@ -339,7 +335,6 @@ def get_classifier(
         class_size=params['class_size'],
         embed_size=params['embed_size']
     ).to(device)
-    # TODO why do we need this?
     classifier.eval()
 
     if isinstance(label_class, str):
@@ -371,7 +366,9 @@ def get_bag_of_words_indices(bag_of_words_paths: List[str]) -> List[int]:
     for bag_of_words_path in bag_of_words_paths:
         with open(bag_of_words_path, "r") as f:
             words = f.read().split("\n")
-        # TODO: why space concat?
+        # todo improve this comment (PIERO)
+        # we are adding a space before word because those are words
+        # inside sentences for the gpt2 tokenizer
         bow_indices.append([TOKENIZER.encode(" " + word) for word in words])
     return bow_indices
 
@@ -487,8 +484,6 @@ def generate_text_pplm(
 
         # Get past/probs for current output, except for last word
         # Note that GPT takes 2 inputs: past + current_token
-        # TODO: what's i/p?
-        # Therefore, use everything from before current i/p token to generate relevant past
 
         # run model forward to obtain unperturbed
         if past is None and output_so_far is not None:
@@ -674,7 +669,6 @@ def run_model():
         output_hidden_states=True
     )
     model.to(device)
-    # TODO: why is this needed?
     model.eval()
 
     # freeze GPT-2 weights
@@ -683,7 +677,7 @@ def run_model():
 
     # figure out conditioning text
     if args.uncond:
-        # TODO: Why two tokens?
+        # TODO: Why two tokens? (SUMANTH)
         tokenized_cond_text = TOKENIZER.encode(
             [TOKENIZER.eos_token, TOKENIZER.eos_token]
         )
@@ -729,12 +723,11 @@ def run_model():
             pass
 
         # keep the prefix, perturbed seq, original seq for each index
-        # TODO: why do we need to keep them? Tey are not used anywhere
         generated_texts.append(
             (tokenized_cond_text, pert_gen_tok_text, unpert_gen_tok_text)
         )
 
-    return
+    return generated_texts
 
 
 if __name__ == "__main__":
