@@ -41,7 +41,6 @@ from transformers.modeling_gpt2 import GPT2LMHeadModel
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
 PPLM_BOW_DISCRIM = 3
-EOS = '<|endoftext|>'
 SMALL_CONST = 1e-15
 TOKENIZER = GPT2Tokenizer.from_pretrained("gpt2-medium")
 
@@ -82,6 +81,7 @@ class ClassificationHead(torch.nn.Module):
         self.mlp = torch.nn.Linear(embed_size, class_size)
 
     def forward(self, hidden_state):
+        # TODO maybe remove next two lines
         # Truncated Language modeling logits (we remove the last token)
         # hidden_state = hidden_state[:, :-1].contiguous().view(-1, self.n_embd)
         # hidden_state = F.relu(self.mlp1(hidden_state))
@@ -128,9 +128,9 @@ def perturb_past(
         model,
         last,
         vocab_size=50257,
+        unpert_past=None,
         unpert_logits=None,
         accumulated_hidden=None,
-        unpert_past=None,
         grad_norms=None,
         stepsize=0.01,
         classifier=None,
@@ -155,8 +155,9 @@ def perturb_past(
         one_hot_bow.scatter_(1, single_bow, 1)
         one_hot_bows_vectors.append(one_hot_bow)
 
-    # Generate inital perturbed past
-    past_perturb_orig = [
+    # initializie perturbation accumulator
+    # TODO why random between 0 and 0?
+    perturbation_accumulator = [
         (np.random.uniform(0.0, 0.0, p.shape).astype("float32"))
         for p in past
     ]
@@ -173,20 +174,21 @@ def perturb_past(
     else:
         decay_mask = 1.0
 
-    # Generate a mask is gradient perturbated is based on a past window
-    _, _, _, current_length, _ = past[0].shape
+    # TODO fix this comment
+    # generate a mask is gradient perturbated is based on a past window
+    _, _, _, curr_length, _ = past[0].shape
 
-    if current_length > window_length and window_length > 0:
+    if curr_length > window_length and window_length > 0:
         ones_key_val_shape = (
-            tuple(past[0].shape[:-2])
-            + tuple([window_length])
-            + tuple(past[0].shape[-1:])
+                tuple(past[0].shape[:-2])
+                + tuple([window_length])
+                + tuple(past[0].shape[-1:])
         )
 
         zeros_key_val_shape = (
-            tuple(past[0].shape[:-2])
-            + tuple([current_length - window_length])
-            + tuple(past[0].shape[-1:])
+                tuple(past[0].shape[:-2])
+                + tuple([curr_length - window_length])
+                + tuple(past[0].shape[-1:])
         )
 
         ones_mask = torch.ones(ones_key_val_shape)
@@ -201,67 +203,61 @@ def perturb_past(
     else:
         window_mask = torch.ones_like(past[0]).cuda()
 
+    # accumulate perturbations for num_iterations
     loss_per_iter = []
     for i in range(num_iterations):
-        print("Iteration ", i)
+        print("Iteration ", i + 1)
 
-        past_perturb = [
+        curr_perturbation = [
             to_var(torch.from_numpy(p_), requires_grad=True)
-            for p_ in past_perturb_orig
+            for p_ in perturbation_accumulator
         ]
-        _, _, _, current_length, _ = past_perturb[0].shape
-
-        pert_past = list(map(add, past, past_perturb))
 
         # Compute hidden using perturbed past
-        logits, future_past, all_hidden = model(last, past=pert_past)
+        curr_pert_past = list(map(add, past, curr_perturbation))
+        all_logits, _, all_hidden = model(last, past=curr_pert_past)
         hidden = all_hidden[-1]
-        new_accumulated_hidden = accumulated_hidden + torch.sum(
-            hidden,
-            dim=1
-        ).detach()
-
+        accumulated_hidden += torch.sum(hidden, dim=1).detach()
         # TODO: Check the layer-norm consistency of this with trained discriminator
-        logits = logits[:, -1, :]
+        logits = all_logits[:, -1, :]
         probs = F.softmax(logits, dim=-1)
-        loss = 0.0
-        loss_list = []
+
+        # compute loss
+        bow_loss = 0.0
+        discrim_loss = 0.0
+        kl_loss = 0.0
 
         if loss_type == PPLM_BOW or loss_type == PPLM_BOW_DISCRIM:
             for one_hot_bow in one_hot_bows_vectors:
                 bow_logits = torch.mm(probs, torch.t(one_hot_bow))
-                bow_loss = -torch.log(torch.sum(bow_logits))
-                loss += bow_loss
-                loss_list.append(bow_loss)
-            print(" pplm_bow_loss:", loss.data.cpu().numpy())
+                bow_loss += -torch.log(torch.sum(bow_logits))
+            print(" pplm_bow_loss:", bow_loss.data.cpu().numpy())
 
         if loss_type == PPLM_DISCRIM or loss_type == PPLM_BOW_DISCRIM:
             ce_loss = torch.nn.CrossEntropyLoss()
-            new_unpert_past = unpert_past
+            # TODO why we need to do this assignment and not just using unpert_past?
+            curr_unpert_past = unpert_past
+            # TODO i is never used, why do we need to do this i times instead multiplying
+            #   torch.sum(unpert_hidden, dim=1) * horizon_length?
             for i in range(horizon_length):
-                future_probs = F.softmax(logits, dim=-1)  # get softmax
-                future_probs = torch.unsqueeze(future_probs, dim=1)
-                _, new_unpert_past, all_hidden = model(
-                    future_probs,
-                    past=new_unpert_past
+                # TODO the next two lines can be done only one time, and why not using probs instead as they do not change at each iteration?
+                curr_probs = F.softmax(logits, dim=-1)  # get softmax
+                curr_probs = torch.unsqueeze(curr_probs, dim=1)
+                _, curr_unpert_past, curr_all_hidden = model(
+                    curr_probs,
+                    past=curr_unpert_past
                 )
-                future_hidden = all_hidden[-1]  # get expected hidden states
-                new_accumulated_hidden = new_accumulated_hidden + torch.sum(
-                    future_hidden,
-                    dim=1
-                )
+                unpert_hidden = curr_all_hidden[-1]  # get expected hidden states
+                accumulated_hidden += torch.sum(unpert_hidden, dim=1)
 
             prediction = classifier(
-                new_accumulated_hidden / (current_length + 1 + horizon_length)
+                accumulated_hidden / (curr_length + 1 + horizon_length)
             )
 
             label = torch.tensor([label_class], device="cuda", dtype=torch.long)
-            discrim_loss = ce_loss(prediction, label)
-            loss += discrim_loss
-            loss_list.append(discrim_loss)
+            discrim_loss += ce_loss(prediction, label)
             print(" pplm_discrim_loss:", discrim_loss.data.cpu().numpy())
 
-        kl_loss = 0.0
         if kl_scale > 0.0:
             unpert_probs = F.softmax(unpert_logits[:, -1, :], dim=-1)
             unpert_probs = (
@@ -275,50 +271,65 @@ def perturb_past(
                 torch.FloatTensor
             ).cuda().detach()
             corrected_probs = probs + correction.detach()
-            kl_loss = kl_scale * (
-                (corrected_probs * (corrected_probs / unpert_probs).log()).sum())
-            loss += kl_loss
+            kl_loss += kl_scale * (
+                (corrected_probs * (corrected_probs / unpert_probs).log()).sum()
+            )
+            print(' kl_loss', (kl_loss).data.cpu().numpy())
 
+        loss = bow_loss + discrim_loss + kl_loss
+        loss_per_iter.append(loss.data.cpu().numpy())
         print(' pplm_loss', (loss - kl_loss).data.cpu().numpy())
 
-        loss_per_iter.append(loss.data.cpu().numpy())
+        # compute gradeints
         loss.backward()
+
+        # calculate gradient norms
         if grad_norms is not None and loss_type == PPLM_BOW:
             grad_norms = [
                 torch.max(grad_norms[index], torch.norm(p_.grad * window_mask))
-                for index, p_ in enumerate(past_perturb)
+                for index, p_ in enumerate(curr_perturbation)
             ]
         else:
             grad_norms = [
                 (torch.norm(p_.grad * window_mask) + SMALL_CONST)
-                for index, p_ in enumerate(past_perturb)
+                for index, p_ in enumerate(curr_perturbation)
             ]
 
+        # normalize gradients
         grad = [
             -stepsize
-            * (p_.grad * window_mask / grad_norms[index] ** gamma).data.cpu().numpy()
-            for index, p_ in enumerate(past_perturb)
+            * (p_.grad * window_mask / grad_norms[
+                index] ** gamma).data.cpu().numpy()
+            for index, p_ in enumerate(curr_perturbation)
         ]
-        past_perturb_orig = list(map(add, grad, past_perturb_orig))
 
-        for p_ in past_perturb:
+        # accumulate gradients
+        perturbation_accumulator = list(map(add, grad, perturbation_accumulator))
+
+        # TODO explain why we need this
+        # reset gradients
+        for p_ in curr_perturbation:
             p_.grad.data.zero_()
 
+        # TODO explain why we need this
+        # reset past
         new_past = []
-        for p in past:
-            new_past.append(p.detach())
-
+        for p_ in past:
+            new_past.append(p_.detach())
         past = new_past
 
-    past_perturb = [torch.from_numpy(p_) for p_ in past_perturb_orig]
-    past_perturb = [to_var(p_, requires_grad=True) for p_ in past_perturb]
-    pert_past = list(map(add, past, past_perturb))
+    # apply the accumulated perturbations to the past
+    perturbation_accumulator = [
+        to_var(torch.from_numpy(p_), requires_grad=True)
+        for p_ in perturbation_accumulator
+    ]
+    pert_past = list(map(add, past, perturbation_accumulator))
 
-    return pert_past, new_accumulated_hidden, grad_norms, loss_per_iter
+    return pert_past, accumulated_hidden, grad_norms, loss_per_iter
 
 
 def get_classifier(
-    name: Optional[str], label_class: Union[str, int], device: str
+        name: Optional[str], label_class: Union[str, int], device: str
 ) -> Tuple[Optional[ClassificationHead], Optional[int]]:
     if name is None:
         return None, None
@@ -439,28 +450,28 @@ def full_text_generation(model, args, context=None, sample=True, device="cuda"):
 
 
 def generate_text_pplm(
-    model,
-    context=None,
-    past=None,
-    device="cuda",
-    sample=True,
-    perturb=True,
-    classifier=None,
-    label_class=None,
-    bow_indices=None,
-    loss_type=0,
-    length=100,
-    grad_length=10000,
-    stepsize=0.02,
-    num_iterations=3,
-    temperature=1.0,
-    gm_scale=0.9,
-    kl_scale=0.01,
-    top_k=10,
-    window_length=0,
-    horizon_length=1,
-    decay=False,
-    gamma=1.5,
+        model,
+        context=None,
+        past=None,
+        device="cuda",
+        sample=True,
+        perturb=True,
+        classifier=None,
+        label_class=None,
+        bow_indices=None,
+        loss_type=0,
+        length=100,
+        grad_length=10000,
+        stepsize=0.02,
+        num_iterations=3,
+        temperature=1.0,
+        gm_scale=0.9,
+        kl_scale=0.01,
+        top_k=10,
+        window_length=0,
+        horizon_length=1,
+        decay=False,
+        gamma=1.5,
 ):
     output_so_far = (
         torch.tensor(context, device=device, dtype=torch.long).unsqueeze(0)
@@ -508,9 +519,9 @@ def generate_text_pplm(
                 past,
                 model,
                 last,
+                unpert_past=unpert_past,
                 unpert_logits=unpert_logits,
                 accumulated_hidden=accumulated_hidden,
-                unpert_past=unpert_past,
                 grad_norms=grad_norms,
                 stepsize=current_stepsize,
                 classifier=classifier,
@@ -546,9 +557,8 @@ def generate_text_pplm(
         if perturb:
             unpert_probs = F.softmax(unpert_logits[:, -1, :], dim=-1)
 
-            gm_scale = gm_scale
             pert_probs = (pert_probs ** gm_scale) * (
-                unpert_probs ** (1 - gm_scale)
+                    unpert_probs ** (1 - gm_scale)
             )  # + SMALL_CONST
 
             pert_probs = top_k_filter(pert_probs, k=top_k, probs=True)  # + SMALL_CONST
@@ -617,10 +627,12 @@ def run_model():
     parser.add_argument("--kl_scale", type=float, default=0.01)
     parser.add_argument("--nocuda", action="store_true", help="no cuda")
     parser.add_argument(
-        "--uncond", action="store_true", help="Generate from end-of-text as prefix"
+        "--uncond", action="store_true",
+        help="Generate from end-of-text as prefix"
     )
     parser.add_argument(
-        "--cond_text", type=str, default="The lake", help="Prefix texts to condition on"
+        "--cond_text", type=str, default="The lake",
+        help="Prefix texts to condition on"
     )
     parser.add_argument("--num_iterations", type=int, default=3)
     parser.add_argument("--grad-length", type=int, default=10000)
@@ -641,9 +653,10 @@ def run_model():
         type=int,
         default=0,
         help="Length of past which is being optimized; "
-        "0 corresponds to infinite window length",
+             "0 corresponds to infinite window length",
     )
-    parser.add_argument("--decay", action="store_true", help="whether to decay or not")
+    parser.add_argument("--decay", action="store_true",
+                        help="whether to decay or not")
     parser.add_argument("--gamma", type=float, default=1.5)
 
     args = parser.parse_args()
@@ -687,7 +700,7 @@ def run_model():
 
     # generate unperturbed and perturbed texts
 
-    # latent_perturb returns:
+    # full_text_generation returns:
     # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
     unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
         model=model, args=args, context=tokenized_cond_text, device=device
