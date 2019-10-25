@@ -131,7 +131,7 @@ def perturb_past(
         stepsize=0.01,
         classifier=None,
         label_class=None,
-        bow_indices=None,
+        one_hot_bows_vectors=None,
         loss_type=0,
         num_iterations=3,
         kl_scale=0.01,
@@ -140,17 +140,6 @@ def perturb_past(
         decay=False,
         gamma=1.5,
 ):
-    # collect one hot vectors for bags of words
-    # todo: make this into a function and move outside for efficiency
-    one_hot_bows_vectors = []
-    for single_bow in bow_indices:
-        single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
-        single_bow = torch.tensor(single_bow).cuda()
-        num_words = single_bow.shape[0]
-        one_hot_bow = torch.zeros(num_words, TOKENIZER.vocab_size).cuda()
-        one_hot_bow.scatter_(1, single_bow, 1)
-        one_hot_bows_vectors.append(one_hot_bow)
-
     # initializie perturbation accumulator
     perturbation_accumulator = [
         (np.zeros(p.shape).astype("float32"))
@@ -368,6 +357,20 @@ def get_bag_of_words_indices(bag_of_words_paths: List[str]) -> List[int]:
     return bow_indices
 
 
+def build_bows_one_hot_vectors(bow_indices):
+    if bow_indices is None:
+        return None
+
+    one_hot_bows_vectors = []
+    for single_bow in bow_indices:
+        single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
+        single_bow = torch.tensor(single_bow).cuda()
+        num_words = single_bow.shape[0]
+        one_hot_bow = torch.zeros(num_words, TOKENIZER.vocab_size).cuda()
+        one_hot_bow.scatter_(1, single_bow, 1)
+        one_hot_bows_vectors.append(one_hot_bow)
+    return one_hot_bows_vectors
+
 def full_text_generation(model, args, context=None, sample=True, device="cuda"):
     classifier, class_id = get_classifier(
         args.discrim,
@@ -471,6 +474,9 @@ def generate_text_pplm(
         else None
     )
 
+    # collect one hot vectors for bags of words
+    one_hot_bows_vectors = build_bows_one_hot_vectors(bow_indices)
+
     grad_norms = None
     last = None
     unpert_discrim_loss = 0
@@ -519,7 +525,7 @@ def generate_text_pplm(
                     stepsize=current_stepsize,
                     classifier=classifier,
                     label_class=label_class,
-                    bow_indices=bow_indices,
+                    one_hot_bows_vectors=one_hot_bows_vectors,
                     loss_type=loss_type,
                     num_iterations=num_iterations,
                     kl_scale=kl_scale,
