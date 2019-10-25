@@ -368,9 +368,17 @@ class GPT2Model(GPT2PreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
-    def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None):
+    def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_are_probs=False):
         input_shape = input_ids.size()
-        input_ids = input_ids.view(-1, input_shape[-1])
+
+        #####################################################################
+        # Piero: Added this piece for allowing getting probabilites as inputs
+        #####################################################################
+        if inputs_are_probs:
+            input_shape = input_shape[:-1]
+        else:
+            input_ids = input_ids.view(-1, input_shape[-1])
+
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, input_shape[-1])
         if position_ids is not None:
@@ -382,8 +390,8 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             past_length = past[0][0].size(-2)
         if position_ids is None:
-            position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+            position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand(input_shape)
 
         # Attention mask.
         if attention_mask is not None:
@@ -417,7 +425,17 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             head_mask = [None] * self.config.n_layer
 
-        inputs_embeds = self.wte(input_ids)
+        #####################################################################
+        # Piero: Added this piece for allowing getting probabilites as inputs
+        #####################################################################
+
+        if inputs_are_probs:
+            inputs_embeds = torch.matmul(input_ids, self.wte.weight[:, :])
+            #inputs_embeds = torch.unsqueeze(inputs_embeds, dim=1)
+        else:
+            inputs_embeds = self.wte(input_ids)
+
+        #inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
@@ -524,13 +542,14 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
                                    self.transformer.wte)
 
     def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
-                labels=None):
+                labels=None, inputs_are_probs=False):
         transformer_outputs = self.transformer(input_ids,
                                                past=past,
                                                attention_mask=attention_mask,
                                                token_type_ids=token_type_ids,
                                                position_ids=position_ids,
-                                               head_mask=head_mask)
+                                               head_mask=head_mask,
+                                               inputs_are_probs=inputs_are_probs)
         hidden_states = transformer_outputs[0]
 
         lm_logits = self.lm_head(hidden_states)

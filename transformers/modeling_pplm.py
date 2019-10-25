@@ -47,14 +47,14 @@ TOKENIZER = GPT2Tokenizer.from_pretrained("gpt2-medium")
 discriminator_models_params = {
     "clickbait": {
         "path": "data/pplm/discriminators/clickbait_classifierhead.pt",
-        "class_size": 5,
+        "class_size": 2,
         "embed_size": 1024,
         "class_vocab": {"non_clickbait": 0, "clickbait": 1},
         "default_class": 1,
     },
     "sentiment": {
         "path": "data/pplm/discriminators/sentiment_classifierhead.pt",
-        "class_size": 2,
+        "class_size": 5,
         "embed_size": 1024,
         "class_vocab": {"very_positive": 2, "very_negative": 3},
         "default_class": 3,
@@ -229,7 +229,7 @@ def perturb_past(
 
         if loss_type == PPLM_DISCRIM or loss_type == PPLM_BOW_DISCRIM:
             ce_loss = torch.nn.CrossEntropyLoss()
-            # TODO all there are (SUMANTH)
+            # TODO all there are for (SUMANTH)
             # TODO why we need to do this assignment and not just using unpert_past?
             curr_unpert_past = unpert_past
             # TODO i is never used, why do we need to do this i times instead multiplying
@@ -238,10 +238,10 @@ def perturb_past(
                 # TODO the next two lines can be done only one time, and why not using probs instead as they do not change at each iteration?
                 curr_probs = F.softmax(logits, dim=-1)  # get softmax
                 curr_probs = torch.unsqueeze(curr_probs, dim=1)
-                # todo modify model to work with probs probs
                 _, curr_unpert_past, curr_all_hidden = model(
                     curr_probs,
-                    past=curr_unpert_past
+                    past=curr_unpert_past,
+                    inputs_are_probs=True
                 )
                 unpert_hidden = curr_all_hidden[-1]  # get expected hidden states
                 accumulated_hidden += torch.sum(unpert_hidden, dim=1)
@@ -277,7 +277,8 @@ def perturb_past(
         print(' pplm_loss', (loss - kl_loss).data.cpu().numpy())
 
         # compute gradeints
-        loss.backward()
+        # TODO check this for correctness (ROSANNE)
+        loss.backward(retain_graph=True)
 
         # calculate gradient norms
         if grad_norms is not None and loss_type == PPLM_BOW:
