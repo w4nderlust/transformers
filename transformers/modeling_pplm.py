@@ -124,7 +124,6 @@ def perturb_past(
         past,
         model,
         last,
-        vocab_size=50257,
         unpert_past=None,
         unpert_logits=None,
         accumulated_hidden=None,
@@ -148,7 +147,7 @@ def perturb_past(
         single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
         single_bow = torch.tensor(single_bow).cuda()
         num_words = single_bow.shape[0]
-        one_hot_bow = torch.zeros(num_words, vocab_size).cuda()
+        one_hot_bow = torch.zeros(num_words, TOKENIZER.vocab_size).cuda()
         one_hot_bow.scatter_(1, single_bow, 1)
         one_hot_bows_vectors.append(one_hot_bow)
 
