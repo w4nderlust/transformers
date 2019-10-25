@@ -141,7 +141,7 @@ def perturb_past(
         gamma=1.5,
 ):
     # initializie perturbation accumulator
-    perturbation_accumulator = [
+    grad_accumulator = [
         (np.zeros(p.shape).astype("float32"))
         for p in past
     ]
@@ -193,7 +193,7 @@ def perturb_past(
 
         curr_perturbation = [
             to_var(torch.from_numpy(p_), requires_grad=True)
-            for p_ in perturbation_accumulator
+            for p_ in grad_accumulator
         ]
 
         # Compute hidden using perturbed past
@@ -231,7 +231,8 @@ def perturb_past(
                     past=curr_unpert_past,
                     inputs_are_probs=True
                 )
-                unpert_hidden = curr_all_hidden[-1]  # get expected hidden states
+                # get expected hidden states
+                unpert_hidden = curr_all_hidden[1]
                 accumulated_hidden += torch.sum(unpert_hidden, dim=1)
 
             prediction = classifier(
@@ -289,7 +290,7 @@ def perturb_past(
         ]
 
         # accumulate gradients
-        perturbation_accumulator = list(map(add, grad, perturbation_accumulator))
+        grad_accumulator = list(map(add, grad, grad_accumulator))
 
         # reset gradients, just to make sure
         for p_ in curr_perturbation:
@@ -302,11 +303,11 @@ def perturb_past(
         past = new_past
 
     # apply the accumulated perturbations to the past
-    perturbation_accumulator = [
+    grad_accumulator = [
         to_var(torch.from_numpy(p_), requires_grad=True)
-        for p_ in perturbation_accumulator
+        for p_ in grad_accumulator
     ]
-    pert_past = list(map(add, past, perturbation_accumulator))
+    pert_past = list(map(add, past, grad_accumulator))
 
     return pert_past, accumulated_hidden, grad_norms, loss_per_iter
 
@@ -371,22 +372,45 @@ def build_bows_one_hot_vectors(bow_indices):
         one_hot_bows_vectors.append(one_hot_bow)
     return one_hot_bows_vectors
 
-def full_text_generation(model, args, context=None, sample=True, device="cuda"):
+
+def full_text_generation(
+        model,
+        context=None,
+        num_samples=1,
+        device="cuda",
+        sample=True,
+        discrim=None,
+        label_class=None,
+        bag_of_words=None,
+        length=100,
+        grad_length=10000,
+        stepsize=0.02,
+        num_iterations=3,
+        temperature=1.0,
+        gm_scale=0.9,
+        kl_scale=0.01,
+        top_k=10,
+        window_length=0,
+        horizon_length=1,
+        decay=False,
+        gamma=1.5,
+        **kwargs
+):
     classifier, class_id = get_classifier(
-        args.discrim,
-        args.label_class,
+        discrim,
+        label_class,
         device
     )
 
     bow_indices = []
-    if args.bag_of_words:
-        bow_indices = get_bag_of_words_indices(args.bag_of_words.split(";"))
+    if bag_of_words:
+        bow_indices = get_bag_of_words_indices(bag_of_words.split(";"))
 
-    if args.bag_of_words and classifier:
+    if bag_of_words and classifier:
         print("Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.")
         loss_type = PPLM_BOW_DISCRIM
 
-    elif args.bag_of_words:
+    elif bag_of_words:
         loss_type = PPLM_BOW
         print("Using PPLM-BoW")
 
@@ -401,7 +425,7 @@ def full_text_generation(model, args, context=None, sample=True, device="cuda"):
         model=model,
         context=context,
         device=device,
-        length=args.length,
+        length=length,
         perturb=False
     )
     torch.cuda.empty_cache()
@@ -410,7 +434,7 @@ def full_text_generation(model, args, context=None, sample=True, device="cuda"):
     discrim_losses = []
     losses_in_time = []
 
-    for i in range(args.num_samples):
+    for i in range(num_samples):
         pert_gen_tok_text, discrim_loss, loss_in_time = generate_text_pplm(
             model=model,
             context=context,
@@ -421,18 +445,18 @@ def full_text_generation(model, args, context=None, sample=True, device="cuda"):
             classifier=classifier,
             label_class=class_id,
             loss_type=loss_type,
-            length=args.length,
-            grad_length=args.grad_length,
-            stepsize=args.stepsize,
-            num_iterations=args.num_iterations,
-            temperature=args.temperature,
-            gm_scale=args.gm_scale,
-            kl_scale=args.kl_scale,
-            top_k=args.top_k,
-            window_length=args.window_length,
-            horizon_length=args.horizon_length,
-            decay=args.decay,
-            gamma=args.gamma,
+            length=length,
+            grad_length=grad_length,
+            stepsize=stepsize,
+            num_iterations=num_iterations,
+            temperature=temperature,
+            gm_scale=gm_scale,
+            kl_scale=kl_scale,
+            top_k=top_k,
+            window_length=window_length,
+            horizon_length=horizon_length,
+            decay=decay,
+            gamma=gamma,
         )
         pert_gen_tok_texts.append(pert_gen_tok_text)
         if classifier is not None:
@@ -539,7 +563,7 @@ def generate_text_pplm(
                 pert_past = past
 
         pert_logits, past, pert_all_hidden = model(last, past=pert_past)
-        pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
+        pert_logits = pert_logits[:, -1, :] / temperature
         pert_probs = F.softmax(pert_logits, dim=-1)
 
         # compute the discriminator loss using unperturbed hidden
@@ -560,16 +584,16 @@ def generate_text_pplm(
 
             pert_probs = (pert_probs ** gm_scale) * (
                     unpert_probs ** (1 - gm_scale)
-            )  # + SMALL_CONST
+            )
 
-            pert_probs = top_k_filter(pert_probs, k=top_k, probs=True)  # + SMALL_CONST
+            pert_probs = top_k_filter(pert_probs, k=top_k, probs=True)
 
             # rescale
             if torch.sum(pert_probs) <= 1:
                 pert_probs = pert_probs / torch.sum(pert_probs)
 
         else:
-            pert_logits = top_k_filter(pert_logits, k=top_k)  # + SMALL_CONST
+            pert_logits = top_k_filter(pert_logits, k=top_k)
             pert_probs = F.softmax(pert_logits, dim=-1)
 
         # sample or greedy
@@ -702,7 +726,7 @@ def run_model():
     # full_text_generation returns:
     # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
     unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
-        model=model, args=args, context=tokenized_cond_text, device=device
+        model=model, context=tokenized_cond_text, device=device, **vars(args)
     )
 
     # untokenize unperturbed text
