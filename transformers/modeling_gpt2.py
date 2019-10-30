@@ -351,7 +351,7 @@ class GPT2Model(GPT2PreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
-        self.drop = nn.Dropout(config.embd_pdrop)
+        self.drop = nn.Dropout(config.embd_pdrop) # KEEP THIS ZERO
         self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
@@ -442,7 +442,7 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             token_type_embeds = 0
         hidden_states = inputs_embeds + position_embeds + token_type_embeds
-        hidden_states = self.drop(hidden_states)
+        #hidden_states = self.drop(hidden_states)
 
         output_shape = input_shape + (hidden_states.size(-1),)
 

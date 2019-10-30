@@ -266,8 +266,7 @@ def perturb_past(
         print(' pplm_loss', (loss - kl_loss).data.cpu().numpy())
 
         # compute gradeints
-        # TODO check this for correctness (ROSANNE)
-        loss.backward(retain_graph=True)
+        loss.backward()
 
         # calculate gradient norms
         if grad_norms is not None and loss_type == PPLM_BOW:
