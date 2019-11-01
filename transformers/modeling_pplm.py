@@ -13,13 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO: refactor to match interfaces of modeling_ctrl.py
-# TODO: use config_pplm.py
 # TODO: add code for training a custom discriminator
 
 """
 Example command with bag of words:
-python modeling_pplm.py -B data/pplm/bow/space.txt --cond_text "The president" --length 100 --gamma 1.5 --num_iterations 3 --num_samples 10 --stepsize 0.01 --window_length 5 --kl_scale 0.01 --gm_scale 0.95
+python modeling_pplm.py -B space --cond_text "The president" --length 100 --gamma 1.5 --num_iterations 3 --num_samples 10 --stepsize 0.01 --window_length 5 --kl_scale 0.01 --gm_scale 0.95
 
 Example command with discriminator:
 python modeling_pplm.py -D sentiment --label_class 3 --cond_text "The lake" --length 10 --gamma 1.0 --num_iterations 30 --num_samples 10 --stepsize 0.01 --kl_scale 0.01 --gm_scale 0.95
@@ -27,7 +25,7 @@ python modeling_pplm.py -D sentiment --label_class 3 --cond_text "The lake" --le
 
 import argparse
 from operator import add
-from typing import Optional, Tuple, Union, List
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -36,6 +34,7 @@ from torch.autograd import Variable
 from tqdm import trange
 
 from transformers import GPT2Tokenizer
+from transformers.file_utils import cached_path
 from transformers.modeling_gpt2 import GPT2LMHeadModel
 
 PPLM_BOW = 1
@@ -44,23 +43,36 @@ PPLM_BOW_DISCRIM = 3
 SMALL_CONST = 1e-15
 TOKENIZER = GPT2Tokenizer.from_pretrained("gpt2-medium")
 
-discriminator_models_params = {
+BAG_OF_WORDS_ARCHIVE_MAP = {
+    'kitchen': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/kitchen.txt",
+    'legal': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/legal.txt",
+    'military': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/military.txt",
+    'monsters': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/monsters.txt",
+    'politics': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/politics.txt",
+    'positive_words': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/positive_words.txt",
+    'religion': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/religion.txt",
+    'science': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/science.txt",
+    'space': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/space.txt",
+    'technology': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/technology.txt",
+}
+
+DISCRIMINATOR_MODELS_PARAMS = {
     "clickbait": {
-        "path": "data/pplm/discriminators/clickbait_classifierhead.pt",
+        "url": "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/discriminators/clickbait_classifierhead.pt",
         "class_size": 2,
         "embed_size": 1024,
         "class_vocab": {"non_clickbait": 0, "clickbait": 1},
         "default_class": 1,
     },
     "sentiment": {
-        "path": "data/pplm/discriminators/sentiment_classifierhead.pt",
+        "url": "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/discriminators/sentiment_classifierhead.pt",
         "class_size": 5,
         "embed_size": 1024,
         "class_vocab": {"very_positive": 2, "very_negative": 3},
         "default_class": 3,
     },
     "toxicity": {
-        "path": "data/pplm/discriminators/toxicity_classifierhead.pt",
+        "url": "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/discriminators/toxicity_classifierhead.pt",
         "class_size": 2,
         "embed_size": 1024,
         "class_vocab": {"non_toxic": 0, "toxic": 1},
@@ -314,16 +326,18 @@ def perturb_past(
 
 
 def get_classifier(
-        name: Optional[str], label_class: Union[str, int], device: str
+        name: Optional[str], label_class: Union[str, int], device: Union[str, torch.device]
 ) -> Tuple[Optional[ClassificationHead], Optional[int]]:
     if name is None:
         return None, None
 
-    params = discriminator_models_params[name]
+    params = DISCRIMINATOR_MODELS_PARAMS[name]
     classifier = ClassificationHead(
         class_size=params['class_size'],
         embed_size=params['embed_size']
     ).to(device)
+    resolved_archive_file = cached_path(params["url"])
+    classifier.load_state_dict(torch.load(resolved_archive_file, map_location=device))
     classifier.eval()
 
     if isinstance(label_class, str):
@@ -350,10 +364,14 @@ def get_classifier(
     return classifier, label_id
 
 
-def get_bag_of_words_indices(bag_of_words_paths: List[str]) -> List[int]:
+def get_bag_of_words_indices(bag_of_words_ids_or_paths: List[str]) -> List[List[List[int]]]:
     bow_indices = []
-    for bag_of_words_path in bag_of_words_paths:
-        with open(bag_of_words_path, "r") as f:
+    for id_or_path in bag_of_words_ids_or_paths:
+        if id_or_path in BAG_OF_WORDS_ARCHIVE_MAP:
+            filepath = cached_path(BAG_OF_WORDS_ARCHIVE_MAP[id_or_path])
+        else:
+            filepath = id_or_path
+        with open(filepath, "r") as f:
             words = f.read().split("\n")
         bow_indices.append([TOKENIZER.encode(word) for word in words])
     return bow_indices
@@ -628,7 +646,7 @@ def run_model():
         "-B",
         type=str,
         default=None,
-        help="Bags of words used for PPLM-BoW. Multiple BoWs separated by ;",
+        help="Bags of words used for PPLM-BoW. Either a BOW id (see list in code) or a filepath. Multiple BoWs separated by ;",
     )
     parser.add_argument(
         "--discrim",
@@ -651,7 +669,7 @@ def run_model():
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--gm_scale", type=float, default=0.9)
     parser.add_argument("--kl_scale", type=float, default=0.01)
-    parser.add_argument("--nocuda", action="store_true", help="no cuda")
+    parser.add_argument("--no_cuda", action="store_true", help="no cuda")
     parser.add_argument(
         "--uncond", action="store_true",
         help="Generate from end-of-text as prefix"
@@ -661,7 +679,7 @@ def run_model():
         help="Prefix texts to condition on"
     )
     parser.add_argument("--num_iterations", type=int, default=3)
-    parser.add_argument("--grad-length", type=int, default=10000)
+    parser.add_argument("--grad_length", type=int, default=10000)
     parser.add_argument(
         "--num_samples",
         type=int,
@@ -692,7 +710,7 @@ def run_model():
     np.random.seed(args.seed)
 
     # set the device
-    device = "cpu" if args.nocuda else "cuda"
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
 
     # load pretrained model
     model = GPT2LMHeadModel.from_pretrained(
