@@ -267,7 +267,7 @@ def perturb_past(
         loss_per_iter.append(loss.data.cpu().numpy())
         print(' pplm_loss', (loss - kl_loss).data.cpu().numpy())
 
-        # compute gradeints
+        # compute gradients
         loss.backward()
 
         # calculate gradient norms
