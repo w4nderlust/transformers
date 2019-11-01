@@ -280,7 +280,7 @@ def perturb_past(
         print(' pplm_loss', (loss - kl_loss).data.cpu().numpy())
 
         # compute gradients
-        loss.backward()
+        loss.backward(retain_graph=True)
 
         # calculate gradient norms
         if grad_norms is not None and loss_type == PPLM_BOW:
