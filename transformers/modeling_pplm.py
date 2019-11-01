@@ -220,16 +220,18 @@ def perturb_past(
             # TODO all there are for (SUMANTH)
             # TODO why we need to do this assignment and not just using unpert_past?
             curr_unpert_past = unpert_past
+            # Get the model's token embeddings in order to compute our own embeds from curr_probs:
+            wte = model.resize_token_embeddings()
             # TODO i is never used, why do we need to do this i times instead multiplying
             #   torch.sum(unpert_hidden, dim=1) * horizon_length?
             for i in range(horizon_length):
                 # TODO the next two lines can be done only one time, and why not using probs instead as they do not change at each iteration?
                 curr_probs = F.softmax(logits, dim=-1)  # get softmax
                 curr_probs = torch.unsqueeze(curr_probs, dim=1)
+                inputs_embeds = torch.matmul(curr_probs, wte.weight.data)
                 _, curr_unpert_past, curr_all_hidden = model(
-                    curr_probs,
                     past=curr_unpert_past,
-                    inputs_are_probs=True
+                    inputs_embeds=inputs_embeds
                 )
                 # get expected hidden states
                 unpert_hidden = curr_all_hidden[1]
