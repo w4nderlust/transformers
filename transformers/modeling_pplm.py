@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# TODO: replace all the .cuda() with a provided device
 # TODO: add code for training a custom discriminator
 
 """
@@ -37,6 +38,8 @@ from transformers import GPT2Tokenizer
 from transformers.file_utils import cached_path
 from transformers.modeling_gpt2 import GPT2LMHeadModel
 from IPython import embed
+
+from transformers.modeling_pplm_discriminator import ClassificationHead
 
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
@@ -82,22 +85,6 @@ DISCRIMINATOR_MODELS_PARAMS = {
 }
 
 
-class ClassificationHead(torch.nn.Module):
-    """ Classification Head for the transformer """
-
-    def __init__(self, class_size=5, embed_size=2048):
-        super(ClassificationHead, self).__init__()
-        self.class_size = class_size
-        self.embed_size = embed_size
-        # self.mlp1 = torch.nn.Linear(embed_size, embed_size)
-        # self.mlp2 = (torch.nn.Linear(embed_size, class_size))
-        self.mlp = torch.nn.Linear(embed_size, class_size)
-
-    def forward(self, hidden_state):
-        # hidden_state = F.relu(self.mlp1(hidden_state))
-        # hidden_state = self.mlp2(hidden_state)
-        logits = self.mlp(hidden_state)
-        return logits
 
 
 def to_var(x, requires_grad=False, volatile=False):
@@ -378,16 +365,16 @@ def get_bag_of_words_indices(bag_of_words_ids_or_paths: List[str]) -> List[List[
     return bow_indices
 
 
-def build_bows_one_hot_vectors(bow_indices):
+def build_bows_one_hot_vectors(bow_indices, device):
     if bow_indices is None:
         return None
 
     one_hot_bows_vectors = []
     for single_bow in bow_indices:
         single_bow = list(filter(lambda x: len(x) <= 1, single_bow))
-        single_bow = torch.tensor(single_bow).cuda()
+        single_bow = torch.tensor(single_bow, device=device)
         num_words = single_bow.shape[0]
-        one_hot_bow = torch.zeros(num_words, TOKENIZER.vocab_size).cuda()
+        one_hot_bow = torch.zeros(num_words, TOKENIZER.vocab_size, device=device)
         one_hot_bow.scatter_(1, single_bow, 1)
         one_hot_bows_vectors.append(one_hot_bow)
     return one_hot_bows_vectors
@@ -519,7 +506,7 @@ def generate_text_pplm(
     )
 
     # collect one hot vectors for bags of words
-    one_hot_bows_vectors = build_bows_one_hot_vectors(bow_indices)
+    one_hot_bows_vectors = build_bows_one_hot_vectors(bow_indices, device)
 
     grad_norms = None
     last = None
